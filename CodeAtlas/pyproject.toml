@@ -1,0 +1,37 @@
+[project]
+name = "codeatlas"
+version = "0.1.0"
+description = "Neo4j-first repository knowledge graph (Python MVP)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.143.3",
+    "httpx>=0.28.1",
+    "neo4j>=6.4.1",
+    "openai>=3.31.0",
+    "pathspec>=1.1.1",
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.16.0",
+    "st-link-analysis>=0.4.0",
+    "streamlit>=1.66.0",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-python>=0.25.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codeatlas"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["neo4j: integration tests that write test-* projects to Neo4j (opt-in: pytest -m neo4j)"]
+addopts = "-m 'not neo4j'"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
