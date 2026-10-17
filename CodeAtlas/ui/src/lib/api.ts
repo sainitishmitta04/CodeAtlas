@@ -8,7 +8,11 @@ import type {
   SearchResponse, Tour, TourKind, WriteGuard,
 } from "./types";
 
-export const API_BASE: string = (import.meta.env?.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") || "/api";
+// Dev: Vite proxies /api to FastAPI. Production: the FastAPI app serves this UI itself, so the
+// API is on the same origin at the root. VITE_API_BASE overrides either default.
+export const API_BASE: string =
+  (import.meta.env?.VITE_API_BASE as string | undefined)?.replace(/\/$/, "") ??
+  (import.meta.env.DEV ? "/api" : "");
 
 type Query = Record<string, string | number | boolean | null | undefined | (string | number)[]>;
 

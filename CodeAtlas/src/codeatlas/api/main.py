@@ -6,9 +6,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from codeatlas.analysis.scanner import ScanError
-from codeatlas.config import ROOT_ENV_FILE, get_settings, shadowed_env_names
+from codeatlas.config import APP_ROOT, ROOT_ENV_FILE, get_settings, shadowed_env_names
 from codeatlas.graph import db, queries
 from codeatlas.graph.db import GraphDBError
 from codeatlas.graph.sync import CapacityError, SyncConflict
@@ -250,3 +251,10 @@ def project_search(pid: str, q: str = Query(min_length=1, max_length=300),
 @app.post("/ask", response_model=Answer)
 def ask(req: AskRequest) -> Answer:
     return answer_question(req.project_id, req.question, req.focus_label, req.focus_id)
+
+
+# Production: serve the built React UI from the same origin. Mounted last, so every API route
+# above is matched first. Skipped when the UI has not been built (local API-only development).
+UI_DIST = APP_ROOT / "ui" / "dist"
+if (UI_DIST / "index.html").is_file():
+    app.mount("/", StaticFiles(directory=UI_DIST, html=True), name="ui")
