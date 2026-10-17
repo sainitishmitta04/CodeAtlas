@@ -14,6 +14,12 @@ from codeatlas.graph.db import GraphDBError
 from codeatlas.graph.sync import CapacityError, SyncConflict
 from codeatlas.models import (AnalysisReport, AnalyzeRequest, Answer, AskRequest,
                               GithubAnalyzeRequest, GraphPayload)
+from codeatlas.intel import service as intel
+from codeatlas.intel.architecture import ArchitectureReport
+from codeatlas.intel.explain import Explanation, SymbolNotFound
+from codeatlas.intel.search import SearchResponse
+from codeatlas.intel.snapshot import ProjectNotFound, SnapshotTooLarge
+from codeatlas.intel.tours import Tour, TourError
 from codeatlas.llm import client as llm_client
 from codeatlas.qa.answer import AnswerFailed, answer_question
 from codeatlas.sources import service
@@ -194,6 +200,51 @@ def graph_path(mode: str, from_id: str, to_id: str, from_label: str = "File",
 @app.get("/graph/impact")
 def graph_impact(label: str, node_id: str, depth: int = 2) -> dict:
     return queries.impact(label, node_id, depth)
+
+
+# ------------------------------------------------------------------ Phase 2: architecture intelligence
+
+def _intel(fn, *args, **kw):
+    """Shared error mapping for architecture / tours / explanations / search."""
+    try:
+        return fn(*args, **kw)
+    except ProjectNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except SymbolNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except TourError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except SnapshotTooLarge as exc:
+        raise HTTPException(413, str(exc)) from exc
+
+
+@app.get("/projects/{pid}/architecture", response_model=ArchitectureReport)
+def project_architecture(pid: str) -> ArchitectureReport:
+    """Inferred layers, components, dependencies, possible violations and cycles."""
+    return _intel(intel.architecture, pid)
+
+
+@app.get("/projects/{pid}/tours", response_model=Tour)
+def project_tour(pid: str, kind: str = "overview", target: str | None = None,
+                 narrate: bool = False) -> Tour:
+    """kind: overview | entry | component | execution | dependency | impact. `narrate=true`
+    additionally asks the LLM to narrate the (deterministic) steps."""
+    return _intel(intel.tour, pid, kind, target, narrate)
+
+
+@app.get("/projects/{pid}/explain", response_model=Explanation)
+def project_explain(pid: str, node_id: str, use_llm: bool = False) -> Explanation:
+    """Observed facts for a symbol; `use_llm=true` adds a grounded interpretation."""
+    return _intel(intel.explain, pid, node_id, use_llm)
+
+
+@app.get("/projects/{pid}/search", response_model=SearchResponse)
+def project_search(pid: str, q: str = Query(min_length=1, max_length=300),
+                   labels: list[str] = Query(default=[]), layers: list[str] = Query(default=[]),
+                   limit: int = 20, offset: int = 0) -> SearchResponse:
+    """Lexical + graph search (identifiers, paths, docstrings, calls; synonym expansion).
+    Not embedding-based."""
+    return _intel(intel.search, pid, q, labels or None, layers or None, limit, offset)
 
 
 @app.post("/ask", response_model=Answer)

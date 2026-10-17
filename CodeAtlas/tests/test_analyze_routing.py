@@ -16,7 +16,7 @@ from codeatlas.graph.db import GraphDBError
 from codeatlas.graph.sync import dry_run_report
 from codeatlas.sources import github, service
 
-from .conftest import FIXTURE, build_zip, fixture_zip
+from .conftest import EMPTY_ARCHITECTURE, FIXTURE, build_zip, fixture_zip
 
 
 class FakeGraph:
@@ -347,6 +347,8 @@ def ui(env, client, monkeypatch):
     def request(method, url, timeout=None, **kw):
         path = url.replace(main.get_settings().codeatlas_api_url, "")
         # graph-browsing reads are out of scope here: canned empty answers, no Neo4j
+        if path.endswith("/architecture"):
+            return httpx.Response(200, json=EMPTY_ARCHITECTURE)
         if path.startswith("/graph/"):
             return httpx.Response(200, json={"nodes": [], "edges": [], "cypher": []})
         if path.endswith("/stats"):

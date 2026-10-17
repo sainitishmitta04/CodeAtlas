@@ -12,7 +12,7 @@ from codeatlas.llm import client as llm
 from codeatlas.models import GraphPayload
 from codeatlas.qa import answer as qa
 
-from .conftest import FIXTURE
+from .conftest import EMPTY_ARCHITECTURE, FIXTURE
 
 FAKE_KEY = "sk-test-FAKE9876543210zyxwvuFAKE9876543210zyxwvu"
 FACTS = ["File shop/models.py DEFINES Class Cart (lines 3-20)",
@@ -154,6 +154,8 @@ def ui(env, client, monkeypatch):
 
     def request(method, url, timeout=None, **kw):
         path = url.replace(main.get_settings().codeatlas_api_url, "")
+        if path.endswith("/architecture"):
+            return httpx.Response(200, json=EMPTY_ARCHITECTURE)
         if path.startswith("/graph/"):
             return httpx.Response(200, json={"nodes": [], "edges": [], "cypher": [],
                                              "complete": True, "next_cursor": None})

@@ -19,7 +19,7 @@ from codeatlas.cli import catalog
 from codeatlas.graph import queries
 from codeatlas.graph.sync import REL_VARIANTS
 
-from .conftest import FIXTURE
+from .conftest import EMPTY_ARCHITECTURE, FIXTURE
 
 PID, OTHER = "big-0001", "other-0002"
 
@@ -267,6 +267,8 @@ def ui(api, fake, monkeypatch):
 
     def request(method, url, timeout=None, **kw):
         path = url.replace(main.get_settings().codeatlas_api_url, "")
+        if path.endswith("/architecture"):
+            return httpx.Response(200, json=EMPTY_ARCHITECTURE)
         if path.endswith("/stats"):
             return httpx.Response(200, json={
                 "nodes": {}, "relationships": {}, "call_confidence": [], "import_resolution": [],
@@ -281,7 +283,7 @@ def ui(api, fake, monkeypatch):
 def test_ui_partial_then_complete(ui, fake):
     at = ui.run()
     assert not at.exception
-    assert at.multiselect[0].value == list(queries.LABELS)  # Module included by default
+    assert next(m for m in at.multiselect if m.label == "Node types").value == list(queries.LABELS)  # Module included by default
     next(s for s in at.slider if s.label == "Nodes per page").set_value(100).run()
     warn = [w.value for w in at.warning]
     assert any("Partial view" in w and "Displayed **100** nodes" in w for w in warn), warn
@@ -295,5 +297,5 @@ def test_ui_partial_then_complete(ui, fake):
 
 def test_ui_reports_hidden_relationships(ui, fake):
     at = ui.run()
-    at.multiselect[0].set_value([lbl for lbl in queries.LABELS if lbl != "Module"]).run()
+    next(m for m in at.multiselect if m.label == "Node types").set_value([lbl for lbl in queries.LABELS if lbl != "Module"]).run()
     assert any("5 relationships are hidden" in c.value for c in at.caption)

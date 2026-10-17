@@ -368,7 +368,9 @@ if proj.get("sync_status") != "complete":
     st.warning(f"Project sync status: **{proj.get('sync_status')}**. The graph may be partially "
                f"updated ({proj.get('sync_error') or 'interrupted'}). Re-run Analyze to repair it.")
 
-tab_graph, tab_stats, tab_paths, tab_ask = st.tabs(["Graph", "Statistics", "Paths & impact", "Ask"])
+tab_graph, tab_stats, tab_paths, tab_ask, tab_arch, tab_tours, tab_explain, tab_search = st.tabs(
+    ["Graph", "Statistics", "Paths & impact", "Ask", "Architecture", "Tours", "Explain",
+     "Search"])
 
 # ------------------------------------------------------------------ graph tab
 
@@ -614,3 +616,391 @@ with tab_ask:
             st.code("\n".join(ans["facts"]))
         show_graph(ans["evidence"], key=f"ask-{pid}", height=420, actions=False)
         show_cypher(ans["evidence"])
+
+
+# ------------------------------------------------------------------ Phase 2: architecture intelligence
+# All four tabs read the same project snapshot through the API; nothing here is canned.
+
+LAYER_COLORS = {"presentation": "#f472b6", "api": "#60a5fa", "business": "#34d399",
+                "domain": "#a78bfa", "data": "#fbbf24", "infrastructure": "#f87171",
+                "utilities": "#94a3b8", "tests": "#cbd5e1", "unclassified": "#e5e7eb"}
+CONF_ICON = {"high": "●●●", "medium": "●●○", "low": "●○○", "none": "○○○"}
+
+
+def get_architecture() -> dict | None:
+    """Server-side cached per sync run, so this is one cheap request per rerun."""
+    status, body = api_raw("GET", f"/projects/{pid}/architecture", timeout=120)
+    if status is None or status >= 400:
+        st.error(error_text(status, body))
+        return None
+    return body
+
+
+def request_tour(kind: str, target: str | None = None, narrate: bool = False):
+    params = {"kind": kind, "narrate": narrate}
+    if target:
+        params["target"] = target
+    with st.spinner("Building the tour from the graph" + (" and narrating…" if narrate else "…")):
+        t = api("GET", f"/projects/{pid}/tours", timeout=180, params=params)
+    if t:
+        ss.tour, ss.tour_step = t, 0
+
+
+def request_explanation(node_id: str, use_llm: bool = False):
+    with st.spinner("Collecting evidence" + (" and asking the LLM…" if use_llm else "…")):
+        e = api("GET", f"/projects/{pid}/explain", timeout=150,
+                params={"node_id": node_id, "use_llm": use_llm})
+    if e:
+        ss.explanation = e
+
+
+def layer_dot(arch: dict, max_components: int = 60) -> str:
+    comps = sorted(arch["components"], key=lambda c: -len(c["files"]))[:max_components]
+    shown = {c["name"] for c in comps}
+    q = lambda x: '"' + str(x).replace('"', "'") + '"'  # noqa: E731
+    lines = ["digraph G {", "rankdir=TB; compound=true; node [shape=box, style=filled, "
+             "fontsize=10]; edge [fontsize=8, color=\"#64748b\"];"]
+    for i, layer in enumerate(arch["layers"]):
+        lines.append(f"subgraph cluster_{i} {{ label={q(layer['title'])}; style=rounded; "
+                     f"color={q(LAYER_COLORS.get(layer['layer'], '#ddd'))};")
+        for c in comps:
+            if c["layer"] == layer["layer"]:
+                lines.append(f"{q(c['name'])} [fillcolor={q(LAYER_COLORS.get(c['layer']))}, "
+                             f"tooltip={q(c['confidence'] + ' confidence')}];")
+        lines.append("}")
+    bad = {(v["source_component"], v["target_component"]) for v in arch["violations"]}
+    for c in comps:
+        for d in c["depends_on"]:
+            if d["component"] in shown:
+                color = ', color="#dc2626", penwidth=2' if (c["name"], d["component"]) in bad else ""
+                lines.append(f"{q(c['name'])} -> {q(d['component'])} "
+                             f"[label={q(d['imports'])}{color}];")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def render_ref_list(title: str, refs: list[dict], total: int | None, key: str):
+    if not refs:
+        return
+    more = f" (showing {len(refs)} of {total})" if total and total > len(refs) else ""
+    st.markdown(f"**{title}**{more}")
+    for i, r in enumerate(refs):
+        c1, c2 = st.columns([5, 1])
+        loc = r.get("location") or {}
+        extra = (f" · lines {', '.join(map(str, r['lines'][:5]))}" if r.get("lines") else "") + \
+                (f" · {r['confidence']}" if r.get("confidence") else "") + \
+                (f" · {r['layer']}" if r.get("layer") else "")
+        c1.caption(f"`{r['label']}` {r['display']}{extra}")
+        if r["label"] != "Module" and c2.button("Explain", key=f"{key}-{i}-{r['node_id']}"):
+            request_explanation(r["node_id"])
+            st.rerun()
+
+
+def render_explanation(exp: dict, key: str):
+    f = exp["facts"]
+    loc = f.get("location") or {}
+    st.markdown(f"### {f['kind'].title()} `{f.get('qualname') or f['name']}`")
+    st.caption(f"{loc.get('file_path', '—')}"
+               + (f" · lines {loc.get('start_line')}–{loc.get('end_line')}"
+                  if loc.get("start_line") else "")
+               + (f" · layer: **{f['layer']}** (inferred), component {f['component']}"
+                  if f.get("layer") else ""))
+    c_facts, c_more = st.columns([3, 2])
+    with c_facts:
+        st.markdown("#### Observed facts (from the graph)")
+        if f.get("signature"):
+            st.code(f["signature"], language="python")
+        for label, value in (("Decorators", f.get("decorators")), ("Bases", f.get("bases")),
+                             ("External calls", f.get("external_calls")),
+                             ("Unresolved calls", f.get("unresolved_calls"))):
+            if value:
+                st.markdown(f"**{label}:** " + ", ".join(f"`{v}`" for v in value))
+        if f.get("docstring"):
+            st.markdown("**Docstring**")
+            st.text(f["docstring"][:1500])
+        counts = f.get("counts", {})
+        render_ref_list("Belongs to", f.get("belongs_to", []), None, f"{key}-own")
+        render_ref_list("Calls", f.get("calls", []), counts.get("calls"), f"{key}-calls")
+        render_ref_list("Called by", f.get("callers", []),
+                        counts.get("callers") or counts.get("callers_of_methods"), f"{key}-callers")
+        render_ref_list("Methods", f.get("methods", []), counts.get("methods"), f"{key}-meth")
+        render_ref_list("Parent classes", f.get("parents", []), None, f"{key}-par")
+        render_ref_list("Subclasses", f.get("subclasses", []), counts.get("subclasses"),
+                        f"{key}-sub")
+        render_ref_list("Defines", f.get("defines", []), counts.get("defines"), f"{key}-def")
+        render_ref_list("Imports", f.get("imports", []), counts.get("imports"), f"{key}-imp")
+        render_ref_list("Imported by", f.get("imported_by", []), counts.get("imported_by"),
+                        f"{key}-impby")
+        if f.get("side_effect_hints"):
+            st.markdown("**Possible side effects (from observed calls)**")
+            for h in f["side_effect_hints"]:
+                st.write("- " + h)
+    with c_more:
+        st.markdown("#### Unknowns")
+        for u in f.get("unknowns", []):
+            st.write("- " + u)
+        ex = f.get("source_excerpt")
+        if ex:
+            with st.expander(f"Source excerpt (verified unchanged) · lines "
+                             f"{ex['start_line']}–{ex['end_line']}"):
+                st.code(ex["text"], language="python")
+        if f["label"] == "Function":
+            if st.button("Execution-path tour from here", key=f"{key}-exec"):
+                request_tour("execution", f["node_id"])
+                st.success("Tour ready: open the **Tours** tab.")
+        if f["label"] in ("Function", "Class", "File"):
+            if st.button("Impact tour", key=f"{key}-impact"):
+                request_tour("impact", f["node_id"])
+                st.success("Tour ready: open the **Tours** tab.")
+    st.markdown("#### Interpretation")
+    if exp.get("interpretation"):
+        st.caption("Generated by the LLM from the observed facts above; verify against them.")
+        st.markdown(exp["interpretation"])
+    elif exp.get("llm_error"):
+        err = exp["llm_error"]
+        st.warning(f"No LLM interpretation: {err.get('message')} ({err.get('code')}). "
+                   "The observed facts above are complete without it.")
+    else:
+        st.caption("No interpretation requested: the facts above are the evidence.")
+    if st.button("Generate LLM interpretation", key=f"{key}-llm"):
+        request_explanation(f["node_id"], use_llm=True)
+        st.rerun()
+
+
+# ------------------------------------------------------------------ architecture tab
+with tab_arch:
+    arch = get_architecture()
+    if arch:
+        st.caption("Layers are **inferred** from observed evidence (framework imports, "
+                   "decorators, base classes, names, import structure). Dependencies are "
+                   "observed imports between components.")
+        cols = st.columns(len(arch["layers"]) or 1)
+        for col, layer in zip(cols, arch["layers"]):
+            col.metric(layer["title"], f"{len(layer['components'])} comp.",
+                       f"{layer['file_count']} files", delta_color="off")
+        if arch["components"]:
+            st.graphviz_chart(layer_dot(arch))
+            if len(arch["components"]) > 60:
+                st.caption("Diagram shows the 60 largest components; all are listed below.")
+        for note in arch["notes"]:
+            st.caption("ℹ️ " + note)
+        if arch["violations"]:
+            with st.expander(f"⚠️ Possible layering violations ({len(arch['violations'])})"):
+                for v in arch["violations"]:
+                    st.write(f"- `{v['source_component']}` [{v['source_layer']}] → "
+                             f"`{v['target_component']}` [{v['target_layer']}] · {v['imports']} "
+                             f"import(s), e.g. {v['example']}")
+        if arch["component_cycles"] or arch["file_cycles"]:
+            with st.expander("🔁 Cycles (tightly coupled)"):
+                for c in arch["component_cycles"]:
+                    st.write("- components: " + " ↔ ".join(c))
+                for c in arch["file_cycles"]:
+                    st.write("- files: " + " ↔ ".join(c))
+
+        names = [c["name"] for c in arch["components"]]
+        if names:
+            st.subheader("Inspect a component")
+            by_name = {c["name"]: c for c in arch["components"]}
+            comp_name = st.selectbox(
+                "Component", names, key="arch_comp",
+                format_func=lambda n: f"{n} · {by_name[n]['layer']} "
+                                      f"{CONF_ICON[by_name[n]['confidence']]}")
+            c = by_name[comp_name]
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**Layer:** {c['layer']} ({c['confidence']} confidence)"
+                            + (f" — ambiguous between {', '.join(c['ambiguous_between'])}"
+                               if c["ambiguous_between"] else ""))
+                st.markdown("**Evidence (observed)**")
+                for ev in c["evidence"] or ["no evidence found"]:
+                    st.write("- " + ev)
+                st.markdown(f"**Files ({len(c['files'])})** · {c['symbol_count']} symbols · "
+                            f"{c['loc']} lines")
+                st.caption(", ".join(c["files"][:30]) + (" …" if len(c["files"]) > 30 else ""))
+            with c2:
+                st.markdown("**Depends on**")
+                st.dataframe(c["depends_on"] or [{"component": "—"}], hide_index=True)
+                st.markdown("**Used by**")
+                st.dataframe(c["used_by"] or [{"component": "—"}], hide_index=True)
+                if c["entry_points"]:
+                    st.markdown("**Entry points:** " + ", ".join(c["entry_points"]))
+            b1, b2, b3 = st.columns(3)
+            for col, kind, label in ((b1, "component", "Component tour"),
+                                     (b2, "dependency", "Dependency tour"),
+                                     (b3, "impact", "Impact tour")):
+                if col.button(label, key=f"arch-{kind}"):
+                    request_tour(kind, comp_name)
+                    st.success("Tour ready: open the **Tours** tab.")
+        with st.expander("Per-file classification and evidence"):
+            st.dataframe([{"file": f["path"], "component": f["component"], "layer": f["layer"],
+                           "confidence": f["confidence"],
+                           "evidence": "; ".join(e["detail"] for e in f["evidence"][:4])}
+                          for f in arch["files"]], hide_index=True)
+
+# ------------------------------------------------------------------ tours tab
+with tab_tours:
+    kinds = {"overview": "Project overview", "entry": "Entry point",
+             "component": "Component", "execution": "Execution path",
+             "dependency": "Dependencies", "impact": "Change impact"}
+    c1, c2, c3 = st.columns([2, 3, 1])
+    kind = c1.selectbox("Tour", list(kinds), format_func=kinds.get, key="tour_kind")
+    target = None
+    comp_names = [c["name"] for c in (arch or {}).get("components", [])]
+    if kind in ("component", "dependency"):
+        target = c2.selectbox("Component", comp_names, key="tour_comp") if comp_names else None
+    elif kind == "execution":
+        fns = api("GET", f"/projects/{pid}/functions") or []
+        fmap = {f"{f['qualname']} ({f['file']})": f["id"] for f in fns}
+        choice = c2.selectbox("Start function", list(fmap), key="tour_fn") if fmap else None
+        target = fmap.get(choice) if choice else None
+    elif kind == "impact":
+        opts = {f"component: {n}": n for n in comp_names}
+        opts.update({f"file: {f['path']}": f["id"]
+                     for f in (api("GET", f"/projects/{pid}/files") or [])})
+        choice = c2.selectbox("Changed component or file", list(opts), key="tour_imp") \
+            if opts else None
+        target = opts.get(choice) if choice else None
+    elif kind == "entry":
+        eps = (arch or {}).get("entry_points", [])
+        target = c2.selectbox("Entry file", ["(auto-detect)"] + eps, key="tour_entry")
+        target = None if target == "(auto-detect)" else target
+    narrate = c3.checkbox("Narrate (LLM)", key="tour_narrate",
+                          help="Ask the LLM to narrate the deterministic steps.")
+    b1, b2 = st.columns([1, 4])
+    if b1.button("Start tour", type="primary", disabled=kind not in ("overview", "entry")
+                 and not target):
+        request_tour(kind, target, narrate)
+    if b2.button("Back to the architecture overview"):
+        request_tour("overview")
+
+    t = ss.get("tour")
+    if t:
+        st.markdown(f"## {t['title']}")
+        st.caption(t["purpose"])
+        for n in t.get("notes", []):
+            st.info(n)
+        if t.get("llm_error"):
+            st.warning(f"No narration: {t['llm_error'].get('message')} "
+                       f"({t['llm_error'].get('code')}). The steps below are complete.")
+        if t.get("narrative"):
+            with st.expander("Narration (generated by the LLM from the steps below)",
+                             expanded=True):
+                st.markdown(t["narrative"])
+        steps = t["steps"]
+        if steps:
+            i = min(ss.get("tour_step", 0), len(steps) - 1)
+            n1, n2, n3 = st.columns([1, 4, 1])
+            if n1.button("◀ Previous", disabled=i == 0):
+                ss.tour_step = i - 1
+                st.rerun()
+            n2.progress((i + 1) / len(steps), text=f"Step {i + 1} of {len(steps)}"
+                        + (" (tour truncated)" if t.get("truncated") else ""))
+            if n3.button("Next ▶", disabled=i >= len(steps) - 1):
+                ss.tour_step = i + 1
+                st.rerun()
+            step = steps[i]
+            st.markdown(f"### {step['index'] + 1}. {step['title']}")
+            tags = [f"layer: **{step['layer']}**" if step.get("layer") else None,
+                    f"component: `{step['component']}`" if step.get("component") else None,
+                    "observed" if step["observed"] else "*inferred*"]
+            st.caption(" · ".join(x for x in tags if x))
+            st.write(step["explanation"])
+            loc = step.get("location") or {}
+            if loc.get("file_path"):
+                st.caption(f"📄 {loc['file_path']}"
+                           + (f" lines {loc['start_line']}–{loc['end_line']}"
+                              if loc.get("start_line") else ""))
+            for ev in step.get("evidence", []):
+                st.caption("• " + ev)
+            if step.get("node_id") and step.get("node_label") in ("Function", "Class", "File",
+                                                                    "Module"):
+                if st.button(f"Explain {step['node_label'].lower()}", key=f"tour-explain-{i}"):
+                    request_explanation(step["node_id"])
+            if step.get("kind") == "component" and step.get("component") in comp_names:
+                if st.button("Tour this component", key=f"tour-comp-{i}"):
+                    request_tour("component", step["component"])
+                    st.rerun()
+            exp = ss.get("explanation")
+            if exp and exp["facts"]["node_id"] == step.get("node_id"):
+                with st.container(border=True):
+                    render_explanation(exp, key="tour-exp")
+            with st.expander("All steps"):
+                for s_ in steps:
+                    st.write(f"{s_['index'] + 1}. {s_['title']} — "
+                             f"{'observed' if s_['observed'] else 'inferred'}")
+        else:
+            st.info("This tour has no steps for the selected project (see the notes above).")
+
+# ------------------------------------------------------------------ explain tab
+with tab_explain:
+    st.caption("Explanations separate **observed facts** (graph + verified source), "
+               "**unknowns**, and an optional **LLM interpretation** written only from those "
+               "facts.")
+    c1, c2 = st.columns([3, 1])
+    name_q = c1.text_input("Find a symbol by name", key="explain_q",
+                           placeholder="e.g. sync_project, Cart, graph/db.py")
+    sel_node = node_by_id(ss.graph, ss.selected) if ss.selected else None
+    if sel_node and c2.button(f"Use selected graph node ({sel_node['caption'][:20]})"):
+        request_explanation(sel_node["id"])
+    if name_q:
+        found = api("GET", f"/projects/{pid}/search", params={"q": name_q, "limit": 15}) or {}
+        options = {f"{r['label']}: {r['display']}": r["node_id"]
+                   for r in found.get("results", [])}
+        if options:
+            pick = st.selectbox("Matches", list(options), key="explain_pick")
+            if st.button("Explain", type="primary", key="explain_go"):
+                request_explanation(options[pick])
+        else:
+            st.info("No symbol matches that name in this project.")
+    exp = ss.get("explanation")
+    if exp:
+        with st.container(border=True):
+            render_explanation(exp, key="explain-tab")
+
+# ------------------------------------------------------------------ search tab
+with tab_search:
+    st.caption("**Lexical + graph search** — matches identifiers, paths, docstrings, "
+               "parameters, decorators and called/imported names, with synonym expansion and "
+               "graph-based ranking. It is not embedding-based semantic search.")
+    q = st.text_input("Describe what you are looking for", key="search_q",
+                      placeholder="e.g. where is the database connection initialized?")
+    f1, f2 = st.columns(2)
+    s_labels = f1.multiselect("Symbol types", ["Function", "Class", "File", "Module"],
+                              key="search_labels")
+    layer_opts = [layer["layer"] for layer in (arch or {}).get("layers", [])]
+    s_layers = f2.multiselect("Layers", layer_opts, key="search_layers")
+    params_key = (q, tuple(s_labels), tuple(s_layers))
+    if ss.get("search_key") != params_key:
+        ss.search_key, ss.search_limit = params_key, 10
+    if q:
+        res = api("GET", f"/projects/{pid}/search", params={
+            "q": q, "labels": s_labels, "layers": s_layers, "limit": ss.search_limit})
+        if res:
+            if res["expanded_terms"]:
+                st.caption("Query terms: " + ", ".join(res["terms"]) + " · expanded: " + "; ".join(
+                    f"{t} → {', '.join(v)}" for t, v in res["expanded_terms"].items()))
+            if not res["results"]:
+                st.info("No matches. Try other words, or remove the filters.")
+            st.caption(f"{res['total']} match(es); showing {len(res['results'])}.")
+            for i, r in enumerate(res["results"]):
+                with st.container(border=True):
+                    a, b = st.columns([5, 1])
+                    loc = r.get("location") or {}
+                    a.markdown(f"`{r['label']}` **{r['name']}**"
+                               + (f" · layer {r['layer']}" if r.get("layer") else ""))
+                    a.caption(f"📄 {loc.get('file_path', '—')}"
+                              + (f" lines {loc['start_line']}–{loc['end_line']}"
+                                 if loc.get("start_line") else "")
+                              + f" · score {r['score']}")
+                    if r.get("summary"):
+                        a.caption(f"“{r['summary']}”")
+                    a.caption("Why: " + "; ".join(r["matched"]))
+                    if r["label"] != "Module" and b.button("Explain", key=f"search-x-{i}"):
+                        request_explanation(r["node_id"])
+            if res["total"] > len(res["results"]) and st.button("Show more results"):
+                ss.search_limit += 10
+                st.rerun()
+            exp = ss.get("explanation")
+            if exp and any(r["node_id"] == exp["facts"]["node_id"] for r in res["results"]):
+                with st.container(border=True):
+                    render_explanation(exp, key="search-exp")

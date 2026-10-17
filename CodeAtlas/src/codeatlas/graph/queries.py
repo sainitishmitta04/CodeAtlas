@@ -562,3 +562,31 @@ def find_entities(pid: str, term: str, limit: int = 5) -> list[tuple[Any, int]]:
 def get_node(label: str, node_id: str):
     rows = db.read(f"MATCH {_anchor(label)} RETURN n", {"id": node_id})
     return rows[0]["n"] if rows else None
+
+
+# ------------------------------------------------------------------ project snapshot (Phase 2)
+# Bounded, project-scoped reads used by architecture / tours / explanations / search.
+# properties() avoids naming optional keys that older projects may not have.
+
+SNAPSHOT_NODES = """
+CALL () {
+  MATCH (n:File {project_id: $pid}) RETURN n
+  UNION ALL MATCH (n:Class {project_id: $pid}) RETURN n
+  UNION ALL MATCH (n:Function {project_id: $pid}) RETURN n
+  UNION ALL MATCH (n:Module {project_id: $pid}) RETURN n
+}
+RETURN labels(n)[0] AS label, properties(n) AS props
+"""
+
+
+def snapshot_rels_query() -> str:
+    from codeatlas.graph.sync import REL_VARIANTS  # fixed table, no user input
+
+    branches = []
+    for key, (src, rel, dst) in REL_VARIANTS.items():
+        if src == "Project":
+            continue  # CONTAINS is implied by File.project_id
+        branches.append(f"MATCH (a:{src} {{project_id: $pid}})-[r:{rel}]->(b:{dst} "
+                        f"{{project_id: $pid}}) RETURN a.id AS s, '{rel}' AS t, b.id AS d, "
+                        "properties(r) AS props")
+    return "\nUNION ALL ".join(branches)
