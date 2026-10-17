@@ -109,7 +109,7 @@ If the API runs somewhere else, set `CODEATLAS_API_URL` before starting Streamli
 Quick API checks (read-only):
 
 ```bash
-curl -s http://127.0.0.1:8000/health          # {"neo4j":{"ok":true},"llm_configured":true,...}
+curl -s http://127.0.0.1:8000/health          # neo4j ping + llm {configured, model, base_url_host, last_call}
 curl -s http://127.0.0.1:8000/projects        # list of CodeAtlas projects
 ```
 
@@ -119,16 +119,21 @@ curl -s http://127.0.0.1:8000/projects        # list of CodeAtlas projects
 
 | Where | What to do | What you should see (fixture repo) |
 |---|---|---|
-| Sidebar header | — | 🟢 Neo4j and 🟢 LLM status |
-| Sidebar → **Analyze repository** | Enter a path, then **Analyze**. Tick *Dry run* to skip writing. | Success box with node/relationship counts (**WRITES** unless it's a dry run) |
+| Sidebar header | — | 🟢 Neo4j. LLM shows ⚪ *configured, not verified yet* until a question is asked, then 🟢 *last call OK* or 🔴 *last call failed: <code>*. `/health` never calls the LLM. |
+| Sidebar → **Analyze repository** | Pick a **Source** (Local Directory / GitHub URL / ZIP Upload), fill it in, then **Dry Run (no database writes)** or **Analyze & Write to Neo4j Aura**. A write first shows the target project and needs the confirmation box ticked. See [REPOSITORY_SOURCES.md](REPOSITORY_SOURCES.md). | A readable result panel above the tabs: source, project id, files/nodes/relationships, resolution, skipped files, raw JSON under *Diagnostics* (**WRITES** only after the confirmed write) |
 | Sidebar → **Project** | Select `sample_repo (sample-repo-…)` | Warning banner only if `sync_status ≠ complete` |
-| Sidebar → **Filters** | Node types, relationship types, max nodes, expansion depth | The graph is re-queried with those parameters (**Reload graph**) |
+| Sidebar → **Filters** | Node types (all five selected by default, including Module), relationship types, nodes per page, expansion depth | Changing a filter reloads the graph. A relationship is drawn when both endpoint types are selected; the rest are counted as *hidden* |
+| **Graph** tab → status line | — | ✅ *Complete graph* with "Displayed X nodes / Y selected · A relationships / B selected", or ⚠️ *Partial view* with **Load next page** / **Load all remaining** (pages load automatically up to 2,000 nodes, `CODEATLAS_AUTO_LOAD_NODES`). Also the project totals and how many relationships are hidden by the type filter. |
 | **Graph** tab | Zoom/pan, click a node, double-click it (or use the toolbar *expand*) | Colours: Project dark, File blue, Class purple, Function green, Module grey. Labelled, directed edges. The right panel shows properties (path, line range, docstring, `unresolved_calls`). Expanding loads neighbours from Neo4j. |
 | **Graph** tab → *Cypher used* | Expand it | The exact Cypher and parameters, which you can paste into Aura |
 | **Statistics** tab | — | Node/relationship counts, CALLS by confidence (`exact` / `name_match`), IMPORTS by resolution, most imported files, most called functions. **Run graph integrity checks** → all `0`. |
 | **Paths & impact** → Dependency path | From `shop/cli.py`, to `shop/models.py` → **Find path** | `cli.py -[IMPORTS]-> models.py` (if there's no path, it tries the reverse direction and says so) |
 | **Paths & impact** → Change impact | Changed file `shop/models.py` → **Analyze impact** | **Files importing it:** `shop/cli.py`, `shop/pricing.py`. **Functions calling into it:** `make_items`, `make_items.build`, `main`. **Subclasses:** none outside the file. Plus a list of what the analysis cannot see. |
-| **Ask** tab | Click an example or type a question → **Ask** | An answer with **Known from the graph** / **Hypotheses** sections, cited paths, caveats, the evidence facts, an evidence graph, and the Cypher used. If the LLM is down, you get the raw Neo4j facts instead. |
+| **Architecture** tab | — | Inferred layers (metrics + Graphviz diagram), components with confidence and evidence, possible violations, cycles; *Inspect a component* → Component / Dependency / Impact tour. See [ARCHITECTURE_INTELLIGENCE.md](ARCHITECTURE_INTELLIGENCE.md) |
+| **Tours** tab | Pick a tour kind and target → **Start tour** | Ordered steps with layer, location, evidence and observed/inferred flags; Previous / Next; **Explain** a symbol step inline. *Narrate (LLM)* is optional |
+| **Explain** tab | Find a symbol by name (or use the selected graph node) → **Explain** | Observed facts, unknowns, verified source excerpt (local projects); **Generate LLM interpretation** is optional |
+| **Search** tab | Describe what you're looking for | Ranked symbols/files with location, layer and *why it matched*. Lexical + graph search, not embeddings |
+| **Ask** tab | Click an example or type a question → **Ask** | An answer with **Known from the graph** / **Hypotheses** sections, cited paths, caveats, the evidence facts, an evidence graph, and the Cypher used. If the LLM call fails you get a red **No answer: the LLM request failed** error with the code, the provider's HTTP status, a hint and a *Diagnostics* expander (request id, redacted provider message); the facts retrieved from Neo4j are shown underneath, labelled *not an LLM answer*. |
 
 Good questions to try:
 
@@ -157,6 +162,39 @@ Tip: select a node in the Graph tab first. Questions with no explicit name use i
 (Use your own id. If `:param` isn't available, replace `$pid` with the quoted id in each query.)
 
 All of these are in `cypher/aura_examples.cypher` and are read-only.
+
+**Complete graph of one project** (graph view). Every File, Class, Function and Module node
+carries the project's id in `project_id` (set by the sync for each node), and the Project node
+has both `id` and `project_id` equal to it. So this read-only query returns every node and
+every relationship of the project, and nothing from other projects:
+
+```cypher
+MATCH (p:Project {id: 'charlie-069e9d6b'})
+OPTIONAL MATCH (n)
+WHERE n = p OR n.project_id = p.id
+WITH collect(DISTINCT n) AS nodes
+UNWIND nodes AS a
+OPTIONAL MATCH (a)-[r]-(b)
+WHERE b IN nodes
+RETURN DISTINCT a, r, b
+```
+
+Equivalent, shorter and cheaper (each relationship is matched once, in its own direction,
+and there's no list lookup per relationship):
+
+```cypher
+MATCH (n) WHERE n.project_id = $pid
+OPTIONAL MATCH (n)-[r]->(m) WHERE m.project_id = $pid
+RETURN n, r, m
+```
+
+- **Find the project id:** it's in brackets after the name in the Streamlit **Project**
+  selector, in `GET /projects`, or from query 0 below. Then `:param pid => 'charlie-069e9d6b'`.
+- Neo4j Browser / Aura Query draw at most a few hundred nodes by default. For big projects,
+  raise the limit in the Query/Browser settings (Browser: `:config initialNodeDisplay: 5000`),
+  or check the totals with query 6 / 6b first.
+- `MATCH (n) WHERE n.project_id = …` scans all nodes. That's fine on AuraDB Free (at most
+  200k nodes); the app itself uses label-anchored, index-backed queries.
 
 **0. Which CodeAtlas projects exist** (table)
 ```cypher
@@ -298,5 +336,9 @@ These create temporary `test-*` projects and delete only those. They check that:
 | uv wants to create `CodeAtlas/.venv` | You forgot `--active`, or `../.venv` isn't activated. |
 | Project shows `sync_status: failed` | Re-run the same `analyze` command; the sync converges to the current source. |
 | Analysis refused as too large | Analyze a subdirectory. Limits are 1,500 files, 25k nodes and 60k relationships per project (`MAX_FILES`, …). |
-| Ask tab returns facts with *LLM unavailable* | Check `OPENAI_*` in `.env`. Graph browsing keeps working without the LLM. |
+| Ask tab: **No answer: the LLM request failed** | Read the code. `llm_not_configured` (503): set `OPENAI_API_KEY` in the workspace `.env`. `llm_auth_failed` (401): the provider did not accept the key. `llm_permission_denied` (403): the request reached the provider with the configured endpoint, model and key, and the provider refused it; check with the provider that this credential is entitled to that endpoint and model. `llm_rate_limited` (429), `llm_timeout` (504), `llm_unreachable` / `llm_provider_error` (502): transient, retried once automatically. The *Diagnostics* expander shows the provider's request id and redacted message to quote to the provider. Graph browsing works regardless. |
+| Sidebar lists *Shell variables ignored in favour of the workspace .env* | Those variables are exported in your shell with a different value than `.env`; the `.env` value is used. Unset them (`unset NAME`) to remove the notice. |
+| *Confirm the target project* after clicking write | Expected: every write shows its target first. Tick the confirmation box and click **Analyze & Write to Neo4j Aura** again. |
+| GitHub: *rate limit reached* (429) | Unauthenticated GitHub API allows 60 requests/hour per IP (each GitHub run uses 2). Wait, or upload the repository as a ZIP. |
+| ZIP rejected (*Unsafe path*, *archive bomb*, *too large*) | See the limits in [REPOSITORY_SOURCES.md](REPOSITORY_SOURCES.md); they can be raised in `.env` (`MAX_ARCHIVE_BYTES`, …). |
 | Fixture `project_id` changed | It comes from the folder's absolute path. Moving a repo creates a new project; delete the old one with `delete-project`. |

@@ -22,6 +22,7 @@ def catalog() -> dict[str, str]:
     """Every Cypher statement the app can issue, with representative label/depth choices."""
     q: dict[str, str] = {
         "list_projects": queries.LIST_PROJECTS, "project": queries.PROJECT,
+        "projects_by_identity": queries.PROJECTS_BY_IDENTITY,
         "node_stats": queries.NODE_STATS, "rel_stats": queries.REL_STATS,
         "call_confidence": queries.CALL_CONFIDENCE, "import_resolution": queries.IMPORT_RESOLUTION,
         "top_imported_files": queries.TOP_IMPORTED_FILES,
@@ -29,6 +30,8 @@ def catalog() -> dict[str, str]:
         "list_files": queries.LIST_FILES, "list_functions": queries.LIST_FUNCTIONS,
         "overview_all": queries.overview_query(list(queries.LABELS)),
         "overview_files": queries.overview_query(["File"]),
+        "overview_rel_variants": queries._rel_variant_counts_query(),
+        "snapshot_nodes": queries.SNAPSHOT_NODES, "snapshot_rels": queries.snapshot_rels_query(),
         "find_entities": queries.FIND_ENTITIES,
         "impact_defined": queries.IMPACT_DEFINED,
         "impact_importers": queries.IMPACT_IMPORTERS % 3,

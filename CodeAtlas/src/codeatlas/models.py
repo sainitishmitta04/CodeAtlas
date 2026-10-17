@@ -109,6 +109,23 @@ class ResolutionStats(BaseModel):
     inherits_unresolved: int = 0
 
 
+class SourceTarget(BaseModel):
+    """Where a run reads from and which project it would write to (shown before any write)."""
+    kind: Literal["local", "github", "zip"]
+    label: str  # human-readable, persisted as Project.root_path / source_label
+    identity: str  # deterministic source identity, persisted as Project.source_identity
+    project_id: str
+    project_name: str
+    ref: str | None = None  # GitHub branch/tag/commit actually analyzed
+    ref_is_default: bool | None = None
+    fingerprint: str | None = None  # ZIP: hash of the extracted source files
+    exists: bool | None = None  # None = Neo4j could not be checked (dry run only)
+    existing_name: str | None = None
+    existing_status: str | None = None
+    existing_synced_at: str | None = None
+    notes: list[str] = []
+
+
 class AnalysisReport(BaseModel):
     project_id: str
     project_name: str
@@ -125,6 +142,7 @@ class AnalysisReport(BaseModel):
     swept_nodes: int = 0
     swept_rels: int = 0
     duration_s: float = 0.0
+    source: SourceTarget | None = None
 
 
 # ---------------------------------------------------------------- API payloads
@@ -154,11 +172,30 @@ class GraphPayload(BaseModel):
     params: dict[str, Any] = {}
     truncated: bool = False
     note: str | None = None
+    # paging (graph overview only)
+    next_cursor: str | None = None  # pass as `after` to load the next page; None = no more
+    complete: bool | None = None
+    page_nodes: int | None = None
+    totals: dict[str, Any] | None = None
 
 
-class AnalyzeRequest(BaseModel):
+class WriteGuard(BaseModel):
+    """A write must name the project it expects to write to (as previously shown to the user)
+    and, if that project already exists, explicitly confirm updating it."""
+    expected_project_id: str | None = None
+    confirm_update: bool = False
+
+
+class AnalyzeRequest(WriteGuard):
     path: str
     name: str | None = None
+    dry_run: bool = False
+
+
+class GithubAnalyzeRequest(WriteGuard):
+    url: str = Field(min_length=1, max_length=500)
+    ref: str | None = Field(default=None, max_length=200)
+    name: str | None = Field(default=None, max_length=200)
     dry_run: bool = False
 
 
@@ -174,6 +211,9 @@ class Answer(BaseModel):
     entity: GNode | None = None
     answer: str
     llm_used: bool
+    # "llm": written by the model from graph facts; "clarification": CodeAtlas could not
+    # identify the entity and asks the user (no LLM call). LLM failures are HTTP errors.
+    kind: Literal["llm", "clarification"] = "llm"
     facts: list[str] = []
     caveats: list[str] = []
     evidence: GraphPayload = GraphPayload()

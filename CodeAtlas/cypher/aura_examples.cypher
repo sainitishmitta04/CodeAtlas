@@ -3,6 +3,12 @@
 // Paths below refer to the fixture repo (CodeAtlas/tests/fixtures/sample_repo);
 // replace them with paths from your own project.
 
+// 00. Complete graph of the selected project (graph view, read-only).
+//     Every code node carries project_id; the Project node has id = project_id = $pid.
+MATCH (n) WHERE n.project_id = $pid
+OPTIONAL MATCH (n)-[r]->(m) WHERE m.project_id = $pid
+RETURN n, r, m;
+
 // 0. CodeAtlas projects (table)
 MATCH (p:Project {source: 'codeatlas'})
 RETURN p.id AS id, p.name AS name, p.sync_status AS status, p.file_count AS files, p.synced_at AS synced;

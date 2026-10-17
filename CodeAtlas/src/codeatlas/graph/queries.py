@@ -12,7 +12,7 @@ Rules:
 from typing import Any
 
 from codeatlas.graph import db
-from codeatlas.graph.payload import PayloadBuilder
+from codeatlas.graph.payload import PayloadBuilder, _clean
 from codeatlas.models import GraphPayload
 
 LABELS = ("Project", "File", "Module", "Class", "Function")
@@ -64,14 +64,25 @@ def _payload(query: str, params: dict[str, Any], limit: int | None = None,
 
 # ------------------------------------------------------------------ projects / stats
 
+# Optional properties (sync_error only exists after a failed sync; source_* only on projects
+# synced since source tracking was added) are read from properties(p) in Python rather than
+# named in Cypher, so older databases do not raise "property key does not exist" notices.
 LIST_PROJECTS = """
 MATCH (p:Project) WHERE p.source = 'codeatlas'
-RETURN p.id AS id, p.name AS name, p.root_path AS root_path, p.sync_status AS sync_status,
-       p.synced_at AS synced_at, p.file_count AS file_count, p.sync_error AS sync_error
-ORDER BY p.name
+RETURN properties(p) AS props
+ORDER BY p.name, p.id
 """
+PROJECT_LIST_FIELDS = ("id", "name", "root_path", "sync_status", "synced_at", "file_count",
+                       "sync_error", "source_kind", "source_label")
 
 PROJECT = "MATCH (p:Project {id: $pid}) RETURN p"
+
+# Dynamic property access (p[$identity_key]) gives the same comparison as
+# p.source_identity = $identity without naming a key that older databases may not have.
+PROJECTS_BY_IDENTITY = """
+MATCH (p:Project) WHERE p.source = 'codeatlas' AND p[$identity_key] = $identity
+RETURN p.id AS id ORDER BY p.synced_at DESC LIMIT 5
+"""
 
 NODE_STATS = """
 MATCH (n:Project {id: $pid}) RETURN 'Project' AS label, count(n) AS count
@@ -157,7 +168,13 @@ INTEGRITY_CHECKS = {
 
 
 def list_projects() -> list[dict]:
-    return db.read(LIST_PROJECTS)
+    rows = db.read(LIST_PROJECTS)
+    return [{k: _clean(r["props"].get(k)) for k in PROJECT_LIST_FIELDS} for r in rows]
+
+
+def projects_by_identity(identity: str) -> list[str]:
+    return [r["id"] for r in db.read(PROJECTS_BY_IDENTITY,
+                                     {"identity": identity, "identity_key": "source_identity"})]
 
 
 def project(pid: str) -> dict | None:
@@ -195,41 +212,106 @@ def list_functions(pid: str) -> list[dict]:
 
 # ------------------------------------------------------------------ graph views
 
+OVERVIEW_PAGE_SIZE = 500
+MAX_PAGE_SIZE = 2000
+
+
 def overview_query(labels: list[str]) -> str:
+    """One page of a project's graph, in a total, stable order (node id).
+
+    Nodes: the next `$page_size` nodes with the selected labels whose id is > `$after`.
+    Relationships: every relationship of a selected type between a node of this page and a
+    node with a selected label whose id is <= the last id of this page, i.e. a node that is
+    on this page or on an earlier one. Each relationship is therefore returned exactly once
+    over a full traversal: on the page that loads its second endpoint. The neighbour `b` is
+    returned too, so the payload can always draw the edge (the UI merges nodes by id).
+    """
     branches = []
     for label in labels:
         _label(label)
         anchor = "{id: $pid}" if label == "Project" else "{project_id: $pid}"
-        branches.append(f"MATCH (n:{label} {anchor}) RETURN n")
+        branches.append(f"MATCH (n:{label} {anchor}) WHERE n.id > $after RETURN n")
     union = "\n  UNION ALL ".join(branches)
     return f"""
-CALL {{
+CALL () {{
   {union}
 }}
-WITH n, COUNT {{ (n)--() }} AS degree
-ORDER BY degree DESC, n.id
-LIMIT $limit
+WITH n ORDER BY n.id LIMIT $fetch
 WITH collect(n) AS ns
-UNWIND ns AS a
-OPTIONAL MATCH (a)-[r]->(b)
-WHERE b IN ns AND type(r) IN $rel_types
-RETURN ns AS nodes, collect(r) AS rels
+WITH ns[0..$page_size] AS page, size(ns) > $page_size AS more
+WITH page, more, page[size(page) - 1].id AS upto
+UNWIND page AS a
+OPTIONAL MATCH (a)-[r]-(b)
+WHERE b.project_id = $pid AND b.id <= upto AND type(r) IN $rel_types
+  AND any(l IN labels(b) WHERE l IN $labels)
+RETURN page AS nodes, collect(DISTINCT r) AS rels, collect(DISTINCT b) AS neighbours,
+       more, upto
 """
 
 
+def _rel_variant_counts_query() -> str:
+    from codeatlas.graph.sync import REL_VARIANTS  # fixed table, no user input
+
+    branches = []
+    for key, (src, rel, dst) in REL_VARIANTS.items():
+        anchor = "{id: $pid}" if src == "Project" else "{project_id: $pid}"
+        branches.append(f"MATCH (:{src} {anchor})-[r:{rel}]->(:{dst} {{project_id: $pid}}) "
+                        f"RETURN '{key}' AS variant, count(r) AS count")  # both ends scoped
+    return "\nUNION ALL ".join(branches)
+
+
+def overview_totals(pid: str, labels: list[str], rel_types: list[str]) -> dict[str, Any]:
+    """Project totals plus what the current filter selects, so the UI can say whether the
+    displayed graph is complete. Relationships whose endpoint label is filtered out are
+    counted as hidden (they are never drawn half-attached)."""
+    from codeatlas.graph.sync import REL_VARIANTS
+
+    nodes = {r["label"]: r["count"] for r in db.read(NODE_STATS, {"pid": pid})}
+    variants = {r["variant"]: r["count"] for r in db.read(_rel_variant_counts_query(),
+                                                          {"pid": pid})}
+    selected_rels = hidden_rels = 0
+    for key, count in variants.items():
+        src, rel, dst = REL_VARIANTS[key]
+        if rel not in rel_types:
+            continue
+        if src in labels and dst in labels:
+            selected_rels += count
+        else:
+            hidden_rels += count
+    return {"nodes": sum(nodes.values()), "relationships": sum(variants.values()),
+            "nodes_by_label": nodes,
+            "selected_nodes": sum(v for k, v in nodes.items() if k in labels),
+            "selected_relationships": selected_rels,
+            "hidden_relationships": hidden_rels}
+
+
 def overview(pid: str, labels: list[str] | None = None, rel_types: list[str] | None = None,
-             limit: int = 150) -> GraphPayload:
-    labels = list(labels or LABELS)
+             limit: int = OVERVIEW_PAGE_SIZE, after: str = "",
+             include_totals: bool | None = None) -> GraphPayload:
+    """`limit` is the page size. Follow `next_cursor` (as `after`) until it is None to load
+    the complete graph for the selection."""
+    labels = [_label(label) for label in (labels or LABELS)]
+    rel_types = _rel_types(rel_types)
+    page_size = max(1, min(int(limit), MAX_PAGE_SIZE))
     q = overview_query(labels)
-    limit = _limit(limit)
-    params = {"pid": pid, "limit": limit, "rel_types": _rel_types(rel_types)}
+    params = {"pid": pid, "page_size": page_size, "fetch": page_size + 1, "after": after or "",
+              "labels": labels, "rel_types": rel_types}
     records = db.read(q, params)
     b = PayloadBuilder()
     b.add_records(records, q, params)
-    n_nodes = len(records[0]["nodes"]) if records else 0
-    return b.build(limit_hit=n_nodes >= limit,
-                   note="Showing the most-connected nodes; expand nodes to see more."
-                   if n_nodes >= limit else None)
+    rec = records[0] if records else None
+    page_nodes = len(rec["nodes"]) if rec else 0
+    more = bool(rec and rec["more"])
+    out = b.build(limit_hit=more, note=(
+        "Partial view: more nodes remain; load the next page to continue." if more else None))
+    out.next_cursor = rec["upto"] if more else None
+    out.complete = not more
+    out.page_nodes = page_nodes
+    if include_totals is None:
+        include_totals = not after  # first page
+    if include_totals:
+        out.totals = overview_totals(pid, labels, rel_types)
+    return out
 
 
 def neighborhood_query(label: str, depth: int) -> str:
@@ -448,7 +530,7 @@ def impact(label: str, node_id: str, depth: int = 2, limit: int = 50) -> dict:
 # ------------------------------------------------------------------ entity lookup (Q&A)
 
 FIND_ENTITIES = """
-CALL {
+CALL () {
   MATCH (n:File {project_id: $pid})
   WHERE toLower(n.path) CONTAINS $term OR toLower(n.module) = $term
   RETURN n, CASE WHEN toLower(n.path) = $term OR toLower(n.name) = $term
@@ -480,3 +562,31 @@ def find_entities(pid: str, term: str, limit: int = 5) -> list[tuple[Any, int]]:
 def get_node(label: str, node_id: str):
     rows = db.read(f"MATCH {_anchor(label)} RETURN n", {"id": node_id})
     return rows[0]["n"] if rows else None
+
+
+# ------------------------------------------------------------------ project snapshot (Phase 2)
+# Bounded, project-scoped reads used by architecture / tours / explanations / search.
+# properties() avoids naming optional keys that older projects may not have.
+
+SNAPSHOT_NODES = """
+CALL () {
+  MATCH (n:File {project_id: $pid}) RETURN n
+  UNION ALL MATCH (n:Class {project_id: $pid}) RETURN n
+  UNION ALL MATCH (n:Function {project_id: $pid}) RETURN n
+  UNION ALL MATCH (n:Module {project_id: $pid}) RETURN n
+}
+RETURN labels(n)[0] AS label, properties(n) AS props
+"""
+
+
+def snapshot_rels_query() -> str:
+    from codeatlas.graph.sync import REL_VARIANTS  # fixed table, no user input
+
+    branches = []
+    for key, (src, rel, dst) in REL_VARIANTS.items():
+        if src == "Project":
+            continue  # CONTAINS is implied by File.project_id
+        branches.append(f"MATCH (a:{src} {{project_id: $pid}})-[r:{rel}]->(b:{dst} "
+                        f"{{project_id: $pid}}) RETURN a.id AS s, '{rel}' AS t, b.id AS d, "
+                        "properties(r) AS props")
+    return "\nUNION ALL ".join(branches)

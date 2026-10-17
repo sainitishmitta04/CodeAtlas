@@ -107,6 +107,9 @@ WITH p, coalesce(p.sync_status IN ['writing', 'sweeping']
                  AND p.sync_heartbeat >= $stale_before, false) AS busy
 FOREACH (_ IN CASE WHEN busy AND NOT $force THEN [] ELSE [1] END |
   SET p.project_id = $pid, p.source = 'codeatlas', p.name = $name, p.root_path = $root,
+      p.source_kind = coalesce($source_kind, p.source_kind),
+      p.source_identity = coalesce($source_identity, p.source_identity),
+      p.source_label = coalesce($source_label, p.source_label),
       p.sync_status = 'writing', p.pending_run_id = $run_id,
       p.sync_started_at = $now_iso, p.sync_heartbeat = $now_ms,
       p.sync_error = null, p.sync_failed_phase = null)
@@ -171,7 +174,10 @@ def sync_project(out: AnalysisOutput, settings: Settings, force: bool = False) -
 
     now_iso = datetime.now(timezone.utc).isoformat()
     lock = db.write(BEGIN_QUERY, {
-        "pid": pid, "run_id": run_id, "name": out.project_name, "root": out.scan.root,
+        "pid": pid, "run_id": run_id, "name": out.project_name, "root": out.root_label,
+        "source_kind": out.source.kind if out.source else None,
+        "source_identity": out.source.identity if out.source else None,
+        "source_label": out.source.label if out.source else None,
         "now_iso": now_iso, "now_ms": _now_ms(), "stale_before": _now_ms() - STALE_LOCK_MS,
         "force": force,
     })[0]
@@ -236,12 +242,12 @@ def _base_report(out: AnalysisOutput, dry_run: bool) -> AnalysisReport:
         rel_type = REL_VARIANTS[variant][1]
         rels[rel_type] = rels.get(rel_type, 0) + len(rel_rows)
     return AnalysisReport(
-        project_id=out.project_id, project_name=out.project_name, root_path=out.scan.root,
+        project_id=out.project_id, project_name=out.project_name, root_path=out.root_label,
         dry_run=dry_run, files_analyzed=len(out.analyses),
         files_with_syntax_errors=[a.path for a in out.analyses if a.has_syntax_errors],
         skipped=out.scan.skipped,
         node_counts={"Project": 1, **{k: len(v) for k, v in out.rows.nodes.items()}},
-        rel_counts=rels, resolution=out.stats,
+        rel_counts=rels, resolution=out.stats, source=out.source,
     )
 
 
