@@ -67,11 +67,17 @@ def _payload(query: str, params: dict[str, Any], limit: int | None = None,
 LIST_PROJECTS = """
 MATCH (p:Project) WHERE p.source = 'codeatlas'
 RETURN p.id AS id, p.name AS name, p.root_path AS root_path, p.sync_status AS sync_status,
-       p.synced_at AS synced_at, p.file_count AS file_count, p.sync_error AS sync_error
+       p.synced_at AS synced_at, p.file_count AS file_count, p.sync_error AS sync_error,
+       p.source_kind AS source_kind, p.source_label AS source_label
 ORDER BY p.name
 """
 
 PROJECT = "MATCH (p:Project {id: $pid}) RETURN p"
+
+PROJECTS_BY_IDENTITY = """
+MATCH (p:Project) WHERE p.source = 'codeatlas' AND p.source_identity = $identity
+RETURN p.id AS id ORDER BY p.synced_at DESC LIMIT 5
+"""
 
 NODE_STATS = """
 MATCH (n:Project {id: $pid}) RETURN 'Project' AS label, count(n) AS count
@@ -158,6 +164,10 @@ INTEGRITY_CHECKS = {
 
 def list_projects() -> list[dict]:
     return db.read(LIST_PROJECTS)
+
+
+def projects_by_identity(identity: str) -> list[str]:
+    return [r["id"] for r in db.read(PROJECTS_BY_IDENTITY, {"identity": identity})]
 
 
 def project(pid: str) -> dict | None:

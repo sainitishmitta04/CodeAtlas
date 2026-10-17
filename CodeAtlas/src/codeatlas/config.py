@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     write_timeout_s: float = 60.0
     llm_timeout_s: float = 45.0
 
+    # Remote / uploaded repository sources (GitHub URL, ZIP upload). Public GitHub only:
+    # there is deliberately no token setting.
+    codeatlas_tmp_dir: str | None = None  # parent dir for temporary checkouts; None = system temp
+    max_archive_bytes: int = Field(default=50_000_000, ge=1)  # upload / download size cap
+    max_extracted_bytes: int = Field(default=300_000_000, ge=1)  # total uncompressed size cap
+    max_archive_entries: int = Field(default=20_000, ge=1)
+    max_compression_ratio: float = Field(default=200.0, gt=1)
+    compression_ratio_min_bytes: int = 1_000_000  # ratio check applies to entries above this
+    github_timeout_s: float = 120.0
+    github_connect_timeout_s: float = 10.0
+
     @property
     def llm_configured(self) -> bool:
         return bool(self.openai_api_key and self.openai_api_key.get_secret_value())

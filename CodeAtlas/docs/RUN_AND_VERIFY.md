@@ -120,7 +120,7 @@ curl -s http://127.0.0.1:8000/projects        # list of CodeAtlas projects
 | Where | What to do | What you should see (fixture repo) |
 |---|---|---|
 | Sidebar header | — | 🟢 Neo4j and 🟢 LLM status |
-| Sidebar → **Analyze repository** | Enter a path, then **Analyze**. Tick *Dry run* to skip writing. | Success box with node/relationship counts (**WRITES** unless it's a dry run) |
+| Sidebar → **Analyze repository** | Pick a **Source** (Local Directory / GitHub URL / ZIP Upload), fill it in, then **Dry Run (no database writes)** or **Analyze & Write to Neo4j Aura**. A write first shows the target project and needs the confirmation box ticked. See [REPOSITORY_SOURCES.md](REPOSITORY_SOURCES.md). | A readable result panel above the tabs: source, project id, files/nodes/relationships, resolution, skipped files, raw JSON under *Diagnostics* (**WRITES** only after the confirmed write) |
 | Sidebar → **Project** | Select `sample_repo (sample-repo-…)` | Warning banner only if `sync_status ≠ complete` |
 | Sidebar → **Filters** | Node types, relationship types, max nodes, expansion depth | The graph is re-queried with those parameters (**Reload graph**) |
 | **Graph** tab | Zoom/pan, click a node, double-click it (or use the toolbar *expand*) | Colours: Project dark, File blue, Class purple, Function green, Module grey. Labelled, directed edges. The right panel shows properties (path, line range, docstring, `unresolved_calls`). Expanding loads neighbours from Neo4j. |
@@ -299,4 +299,7 @@ These create temporary `test-*` projects and delete only those. They check that:
 | Project shows `sync_status: failed` | Re-run the same `analyze` command; the sync converges to the current source. |
 | Analysis refused as too large | Analyze a subdirectory. Limits are 1,500 files, 25k nodes and 60k relationships per project (`MAX_FILES`, …). |
 | Ask tab returns facts with *LLM unavailable* | Check `OPENAI_*` in `.env`. Graph browsing keeps working without the LLM. |
+| *Confirm the target project* after clicking write | Expected: every write shows its target first. Tick the confirmation box and click **Analyze & Write to Neo4j Aura** again. |
+| GitHub: *rate limit reached* (429) | Unauthenticated GitHub API allows 60 requests/hour per IP (each GitHub run uses 2). Wait, or upload the repository as a ZIP. |
+| ZIP rejected (*Unsafe path*, *archive bomb*, *too large*) | See the limits in [REPOSITORY_SOURCES.md](REPOSITORY_SOURCES.md); they can be raised in `.env` (`MAX_ARCHIVE_BYTES`, …). |
 | Fixture `project_id` changed | It comes from the folder's absolute path. Moving a repo creates a new project; delete the old one with `delete-project`. |

@@ -3,6 +3,7 @@
 Run (from CodeAtlas/):  streamlit run ui/app.py
 """
 
+import hashlib
 import json
 import os
 import warnings
@@ -46,23 +47,38 @@ st.set_page_config(page_title="CodeAtlas", layout="wide")
 
 # ------------------------------------------------------------------ API helpers
 
-def api(method: str, path: str, timeout: float = 60, **kw):
+def api_raw(method: str, path: str, timeout: float = 60, **kw) -> tuple[int | None, object]:
+    """(status, body); status None means the backend could not be reached."""
     try:
         r = httpx.request(method, f"{API}{path}", timeout=timeout, **kw)
     except httpx.HTTPError as exc:
-        st.error(
+        return None, (
             f"Backend not reachable at {API} ({type(exc).__name__}). Start the API in a second "
             "terminal, from CodeAtlas/ with the workspace venv active:\n\n"
             "`source ../.venv/bin/activate && uvicorn codeatlas.api.main:app --port 8000`")
+    try:
+        body = r.json()
+    except ValueError:
+        body = r.text
+    if r.status_code >= 400 and isinstance(body, dict) and "detail" in body:
+        body = body["detail"]
+    return r.status_code, body
+
+
+def error_text(status: int | None, detail) -> str:
+    if isinstance(detail, dict):
+        detail = detail.get("message") or json.dumps(detail)
+    elif isinstance(detail, list):  # FastAPI validation errors
+        detail = "; ".join(str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail)
+    return str(detail) if status is None else f"{status}: {detail}"
+
+
+def api(method: str, path: str, timeout: float = 60, **kw):
+    status, body = api_raw(method, path, timeout=timeout, **kw)
+    if status is None or status >= 400:
+        st.error(error_text(status, body))
         return None
-    if r.status_code >= 400:
-        try:
-            detail = r.json().get("detail", r.text)
-        except ValueError:
-            detail = r.text
-        st.error(f"{r.status_code}: {detail}")
-        return None
-    return r.json()
+    return body
 
 
 def to_elements(payload: dict) -> dict:
@@ -118,6 +134,174 @@ def show_cypher(payload: dict):
             st.code(json.dumps(payload["params"], indent=2), language="json")
 
 
+# ------------------------------------------------------------------ repository ingestion
+
+SOURCES = ["Local Directory", "GitHub URL", "ZIP Upload"]
+
+
+def target_card(t: dict):
+    """The project a write would go to, shown before the write is confirmed."""
+    state = ("**existing project — will be updated**" if t.get("exists") else
+             "**new project**" if t.get("exists") is False else "existence unknown")
+    st.markdown(f"**Target:** `{t['project_id']}` ({state})  \n"
+                f"Name: **{t['project_name']}**  \nSource: `{t['label']}`")
+    if t.get("ref"):
+        st.caption(f"Ref: {t['ref']}" + (" (default branch)" if t.get("ref_is_default") else ""))
+    if t.get("exists"):
+        st.caption(f"Currently: {t.get('existing_name')} · status {t.get('existing_status')} · "
+                   f"synced {t.get('existing_synced_at') or '—'}")
+    for note in t.get("notes", []):
+        st.caption("ℹ️ " + note)
+
+
+def ingest_panel(projects: list[dict], max_upload: int | None):
+    st.subheader("Analyze repository")
+    kind = st.radio("Source", SOURCES, key="src_kind")
+    name = st.text_input("Project name (optional)", key="src_name").strip()
+
+    if kind == "Local Directory":
+        path = st.text_input("Local repository path", placeholder="/path/to/repo",
+                             key="src_path").strip()
+        ready, inputs = bool(path), ("local", path, name)
+
+        def build(dry: bool, guard: dict):
+            return "/projects/analyze", {"json": {"path": path, "name": name or None,
+                                                  "dry_run": dry, **guard}}
+    elif kind == "GitHub URL":
+        url = st.text_input("Public GitHub repository URL",
+                            placeholder="https://github.com/owner/repo", key="src_url").strip()
+        ref = st.text_input("Branch, tag or commit (optional)", key="src_ref",
+                            help="Empty = the repository's default branch.").strip()
+        st.caption("Public repositories only. No token is requested or stored; the source "
+                   "archive is downloaded to a temporary folder and deleted after analysis.")
+        ready, inputs = bool(url), ("github", url, ref, name)
+
+        def build(dry: bool, guard: dict):
+            return "/projects/analyze/github", {"json": {
+                "url": url, "ref": ref or None, "name": name or None, "dry_run": dry, **guard}}
+    else:
+        upload = st.file_uploader("ZIP archive", type=["zip"], key="src_zip")
+        zip_projects = {f"{p['name']} ({p['id']})": p["id"] for p in projects
+                        if p.get("source_kind") == "zip"}
+        mode = st.radio("Target", ["New project", "Update an existing ZIP project"],
+                        key="src_zip_mode", disabled=not zip_projects,
+                        help="Updating replaces that project's graph with this upload's files.")
+        target_pid = None
+        if mode != "New project" and zip_projects:
+            target_pid = zip_projects[st.selectbox("Project to update", list(zip_projects),
+                                                   key="src_zip_target")]
+        data = upload.getvalue() if upload else b""
+        too_big = bool(max_upload and len(data) > max_upload)
+        if too_big:
+            st.error(f"The file is {len(data):,} bytes; the limit is {max_upload:,}.")
+        ready = bool(data) and not too_big
+        inputs = ("zip", hashlib.sha256(data).hexdigest(), upload.name if upload else "",
+                  name, target_pid)
+
+        def build(dry: bool, guard: dict):
+            params = {"filename": upload.name, "dry_run": dry, **guard}
+            if name:
+                params["name"] = name
+            if target_pid:
+                params["target_project_id"] = target_pid
+            return "/projects/analyze/zip", {
+                "content": data, "params": params, "headers": {"Content-Type": "application/zip"}}
+
+    key = hashlib.sha1(repr(inputs).encode()).hexdigest()
+    pending = ss.get("pending_target") if ss.get("pending_key") == key else None
+    confirmed = False
+    if pending:
+        target_card(pending)
+        confirmed = st.checkbox(
+            "Yes, update this existing project in Neo4j Aura" if pending.get("exists")
+            else "Yes, create this project in Neo4j Aura",
+            key=f"confirm-{key}-{pending['project_id']}-{pending.get('exists')}")
+
+    dry_clicked = st.button("Dry Run (no database writes)", disabled=not ready)
+    write_clicked = st.button("Analyze & Write to Neo4j Aura", type="primary", disabled=not ready)
+    st.caption("Dry Run never writes. *Analyze & Write* writes this project's graph to Neo4j "
+               "Aura and asks you to confirm the target project first.")
+
+    if not (dry_clicked or write_clicked):
+        return
+    dry = dry_clicked
+    if write_clicked and pending and not confirmed:
+        st.warning("Tick the confirmation above to write to Neo4j Aura.")
+        return
+    guard = ({"expected_project_id": pending["project_id"],
+              "confirm_update": bool(pending.get("exists"))} if write_clicked and pending else {})
+    path_, kw = build(dry, guard)
+    stage = ("Resolving the repository on GitHub, downloading and " if kind == "GitHub URL" else
+             "Uploading, validating and extracting the ZIP, then " if kind == "ZIP Upload" else "")
+    with st.status(f"{stage}scanning and parsing" + (" (dry run)…" if dry else
+                   " and syncing to Neo4j Aura…"), expanded=False) as status:
+        code, body = api_raw("POST", path_, timeout=900, **kw)
+        if code == 409 and isinstance(body, dict) and body.get("code") == "confirmation_required":
+            ss.pending_key, ss.pending_target = key, body["target"]
+            status.update(label="Confirm the target project", state="complete")
+            st.rerun()
+        if code is None or code >= 400:
+            status.update(label="Analysis failed", state="error")
+            st.error(error_text(code, body))
+            ss.last_report = None
+            return
+        status.update(label="Dry run finished" if dry else "Synced to Neo4j Aura",
+                      state="complete")
+    ss.last_report = body
+    if dry and body.get("source"):
+        ss.pending_key, ss.pending_target = key, body["source"]  # ready to confirm a write
+    else:
+        ss.pending_key = ss.pending_target = None
+    if not dry:
+        ss.graph = None
+    st.rerun()  # show the summary / confirmation and refresh the project list
+
+
+def render_report(rep: dict | None):
+    if not rep:
+        return
+    src = rep.get("source") or {}
+    title = (f"Dry run (nothing written): {rep['project_name']}" if rep["dry_run"] else
+             f"Synced to Neo4j Aura: {rep['project_name']} — status {rep.get('sync_status')}")
+    with st.expander(title, expanded=True):
+        st.markdown(f"**Project:** `{rep['project_id']}`  \n**Source:** "
+                    f"{src.get('kind', 'local')} · `{src.get('label') or rep['root_path']}`" +
+                    (f"  \n**Ref:** {src['ref']}" + (" (default branch)"
+                     if src.get("ref_is_default") else "") if src.get("ref") else ""))
+        if src.get("exists") is not None:
+            verb = "would update" if rep["dry_run"] else "updated"
+            st.caption((f"{verb} an existing project" if src["exists"] else
+                        "new project" if rep["dry_run"] else "created a new project"))
+        nodes, rels = rep.get("node_counts", {}), rep.get("rel_counts", {})
+        c = st.columns(4)
+        c[0].metric("Files analyzed", rep["files_analyzed"])
+        c[1].metric("Nodes", sum(nodes.values()))
+        c[2].metric("Relationships", sum(rels.values()))
+        c[3].metric("Skipped files", len(rep.get("skipped", [])))
+        c1, c2, c3 = st.columns(3)
+        c1.markdown("**Nodes**")
+        c1.dataframe([{"label": k, "count": v} for k, v in nodes.items()], hide_index=True)
+        c2.markdown("**Relationships**")
+        c2.dataframe([{"type": k, "count": v} for k, v in rels.items()], hide_index=True)
+        c3.markdown("**Resolution**")
+        c3.dataframe([{"metric": k, "value": v} for k, v in rep.get("resolution", {}).items()],
+                     hide_index=True)
+        if not rep["dry_run"]:
+            st.caption(f"Run {rep.get('run_id')} · removed stale: {rep.get('swept_nodes', 0)} "
+                       f"nodes, {rep.get('swept_rels', 0)} relationships · "
+                       f"{rep.get('duration_s', 0)} s")
+        for note in src.get("notes", []):
+            st.info(note)
+        if rep.get("files_with_syntax_errors"):
+            st.warning("Files with syntax errors (partially parsed): "
+                       + ", ".join(rep["files_with_syntax_errors"]))
+        if rep.get("skipped"):
+            with st.expander(f"Skipped files ({len(rep['skipped'])})"):
+                st.dataframe(rep["skipped"], hide_index=True)
+        with st.expander("Diagnostics (raw API response)"):
+            st.json(rep, expanded=False)
+
+
 # ------------------------------------------------------------------ sidebar
 
 ss = st.session_state
@@ -134,25 +318,12 @@ with st.sidebar:
                  ("" if neo.get("ok") else f": {neo.get('error')}"))
         st.write(("🟢" if health["llm_configured"] else "⚪") + f" LLM ({health['model']})")
 
-    with st.form("analyze"):
-        st.subheader("Analyze repository")
-        path = st.text_input("Local repository path", placeholder="/path/to/repo")
-        name = st.text_input("Project name (optional)")
-        dry = st.checkbox("Dry run (no database writes)", value=False)
-        if st.form_submit_button("Analyze") and path:
-            with st.spinner("Scanning, parsing and syncing to Neo4j..."):
-                rep = api("POST", "/projects/analyze", timeout=900,
-                          json={"path": path, "name": name or None, "dry_run": dry})
-            if rep:
-                st.success(f"{'Dry run' if rep['dry_run'] else 'Synced'}: {rep['project_id']}")
-                st.json({"nodes": rep["node_counts"], "relationships": rep["rel_counts"],
-                         "resolution": rep["resolution"], "skipped": len(rep["skipped"]),
-                         "swept": {"nodes": rep["swept_nodes"], "rels": rep["swept_rels"]}},
-                        expanded=False)
-                if not rep["dry_run"]:
-                    ss.graph = None
-
     projects = api("GET", "/projects", timeout=20) or []
+    ingest_panel(projects, (health or {}).get("max_upload_bytes"))
+
+render_report(ss.get("last_report"))
+
+with st.sidebar:
     if not projects:
         st.info("No CodeAtlas projects in Neo4j yet.")
         st.stop()

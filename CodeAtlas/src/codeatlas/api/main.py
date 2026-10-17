@@ -3,17 +3,21 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
-from codeatlas.analysis.pipeline import analyze_repository
 from codeatlas.analysis.scanner import ScanError
 from codeatlas.config import get_settings
 from codeatlas.graph import db, queries
 from codeatlas.graph.db import GraphDBError
-from codeatlas.graph.sync import CapacityError, SyncConflict, dry_run_report, sync_project
-from codeatlas.models import AnalysisReport, AnalyzeRequest, Answer, AskRequest, GraphPayload
+from codeatlas.graph.sync import CapacityError, SyncConflict
+from codeatlas.models import (AnalysisReport, AnalyzeRequest, Answer, AskRequest,
+                              GithubAnalyzeRequest, GraphPayload)
 from codeatlas.qa.answer import answer_question
+from codeatlas.sources import service
+from codeatlas.sources.archive import temp_workspace
+from codeatlas.sources.errors import SourceError, SourceTooLarge
 
 logging.basicConfig(level=get_settings().log_level.upper())
 
@@ -37,28 +41,77 @@ async def _input_error(_, exc: queries.QueryInputError):
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
+@app.exception_handler(SourceError)
+async def _source_error(_, exc: SourceError):
+    if isinstance(exc, service.ConfirmationRequired):
+        detail = {"code": exc.code, "message": exc.message,
+                  "target": exc.target.model_dump(mode="json")}
+    else:
+        detail = exc.message
+    return JSONResponse(status_code=exc.status, content={"detail": detail})
+
+
 @app.get("/health")
 def health() -> dict:
     s = get_settings()
     return {"neo4j": db.ping() if s.neo4j_configured else {"ok": False, "error": "not configured"},
-            "llm_configured": s.llm_configured, "model": s.openai_model}
+            "llm_configured": s.llm_configured, "model": s.openai_model,
+            "max_upload_bytes": s.max_archive_bytes}
 
 
-@app.post("/projects/analyze", response_model=AnalysisReport)
-def analyze(req: AnalyzeRequest) -> AnalysisReport:
-    settings = get_settings()
+def _run_analysis(fn, *args, **kw) -> AnalysisReport:
+    """Shared error mapping for every source (local, GitHub, ZIP)."""
     try:
-        out = analyze_repository(req.path, settings, req.name)
+        return fn(*args, **kw)
     except ScanError as exc:
         raise HTTPException(400, str(exc)) from exc
-    if req.dry_run:
-        return dry_run_report(out)
-    try:
-        return sync_project(out, settings)
     except CapacityError as exc:
         raise HTTPException(413, str(exc)) from exc
     except SyncConflict as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/projects/analyze", response_model=AnalysisReport)
+def analyze(req: AnalyzeRequest) -> AnalysisReport:
+    """Local directory."""
+    return _run_analysis(service.analyze_local, req, get_settings())
+
+
+@app.post("/projects/analyze/github", response_model=AnalysisReport)
+def analyze_github(req: GithubAnalyzeRequest) -> AnalysisReport:
+    """Public GitHub repository (archive download; no git, no token)."""
+    return _run_analysis(service.analyze_github, req, get_settings())
+
+
+@app.post("/projects/analyze/zip", response_model=AnalysisReport)
+async def analyze_zip(request: Request,
+                      filename: str = Query("upload.zip", max_length=255),
+                      name: str | None = Query(None, max_length=200),
+                      dry_run: bool = False,
+                      target_project_id: str | None = Query(None, max_length=300),
+                      expected_project_id: str | None = Query(None, max_length=300),
+                      confirm_update: bool = False) -> AnalysisReport:
+    """ZIP upload sent as the raw request body (Content-Type: application/zip)."""
+    settings = get_settings()
+    limit = settings.max_archive_bytes
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        raise SourceTooLarge(f"Upload is larger than {limit:,} bytes.")
+    with temp_workspace(settings) as work:
+        upload, total = work / "upload.zip", 0
+        with open(upload, "wb") as fh:
+            async for chunk in request.stream():
+                total += len(chunk)
+                if total > limit:
+                    raise SourceTooLarge(f"Upload is larger than {limit:,} bytes.")
+                fh.write(chunk)
+        if total == 0:
+            raise HTTPException(400, "Empty upload; send the ZIP file as the request body.")
+        return await run_in_threadpool(
+            _run_analysis, service.analyze_zip_file, upload, work, settings,
+            filename=filename, name=name or None, target_project_id=target_project_id or None,
+            dry_run=dry_run, expected_project_id=expected_project_id,
+            confirm_update=confirm_update)
 
 
 @app.get("/projects")

@@ -22,6 +22,7 @@ def catalog() -> dict[str, str]:
     """Every Cypher statement the app can issue, with representative label/depth choices."""
     q: dict[str, str] = {
         "list_projects": queries.LIST_PROJECTS, "project": queries.PROJECT,
+        "projects_by_identity": queries.PROJECTS_BY_IDENTITY,
         "node_stats": queries.NODE_STATS, "rel_stats": queries.REL_STATS,
         "call_confidence": queries.CALL_CONFIDENCE, "import_resolution": queries.IMPORT_RESOLUTION,
         "top_imported_files": queries.TOP_IMPORTED_FILES,
