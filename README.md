@@ -2,7 +2,7 @@
 
 # 🗺️ CodeAtlas
 
-### Turn any Python repository into a living knowledge graph in Neo4j
+### Turn any repository into a living knowledge graph in Neo4j
 
 Explore it visually. Ask it questions. Take guided tours. See how it is layered.
 
