@@ -1,0 +1,20 @@
+{
+  "services": {
+    "codeatlas": {
+      "root": "CodeAtlas",
+      "entrypoint": "app:app"
+    },
+    "ui": {
+      "root": "CodeAtlas/ui",
+      "buildCommand": "npm run build",
+      "outputDirectory": "dist"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": { "service": "codeatlas", "path": "/:path*" } },
+    { "source": "/docs", "destination": { "service": "codeatlas" } },
+    { "source": "/docs/:path*", "destination": { "service": "codeatlas" } },
+    { "source": "/openapi.json", "destination": { "service": "codeatlas" } },
+    { "source": "/(.*)", "destination": { "service": "ui" } }
+  ]
+}
