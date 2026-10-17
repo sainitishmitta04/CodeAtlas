@@ -172,6 +172,11 @@ class GraphPayload(BaseModel):
     params: dict[str, Any] = {}
     truncated: bool = False
     note: str | None = None
+    # paging (graph overview only)
+    next_cursor: str | None = None  # pass as `after` to load the next page; None = no more
+    complete: bool | None = None
+    page_nodes: int | None = None
+    totals: dict[str, Any] | None = None
 
 
 class WriteGuard(BaseModel):
@@ -206,6 +211,9 @@ class Answer(BaseModel):
     entity: GNode | None = None
     answer: str
     llm_used: bool
+    # "llm": written by the model from graph facts; "clarification": CodeAtlas could not
+    # identify the entity and asks the user (no LLM call). LLM failures are HTTP errors.
+    kind: Literal["llm", "clarification"] = "llm"
     facts: list[str] = []
     caveats: list[str] = []
     evidence: GraphPayload = GraphPayload()

@@ -29,16 +29,24 @@ ROOT_ENV_FILE = find_env_file()
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT_ENV_FILE, extra="ignore")
 
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                   dotenv_settings, file_secret_settings):
+        # The workspace .env is the source of truth. Shell variables only fill settings the
+        # .env does not define, so a stale exported GEMINI_API_KEY / NEO4J_* cannot silently
+        # replace the configured values (see shadowed_env_names for diagnostics).
+        return init_settings, dotenv_settings, env_settings, file_secret_settings
+
     # Neo4j
     neo4j_uri: str = ""
     neo4j_username: str = "neo4j"
     neo4j_password: SecretStr = SecretStr("")
     neo4j_database: str = "neo4j"
 
-    # OpenAI-compatible LLM endpoint
-    openai_api_key: SecretStr | None = None
-    openai_base_url: str | None = None
-    openai_model: str = "gpt-4o-mini"
+    # Gemini (native Generative Language API) LLM endpoint
+    gemini_api_key: SecretStr | None = None
+    gemini_base_url: str | None = None  # default: https://generativelanguage.googleapis.com/v1beta
+    gemini_model: str = "gemini-3.8-flash"
 
     app_env: str = "dev"
     log_level: str = "INFO"
@@ -56,6 +64,7 @@ class Settings(BaseSettings):
     query_timeout_s: float = 30.0
     write_timeout_s: float = 60.0
     llm_timeout_s: float = 45.0
+    llm_max_retries: int = Field(default=1, ge=0, le=3)  # only for 429 / 5xx / timeouts / network
 
     # Remote / uploaded repository sources (GitHub URL, ZIP upload). Public GitHub only:
     # there is deliberately no token setting.
@@ -70,11 +79,24 @@ class Settings(BaseSettings):
 
     @property
     def llm_configured(self) -> bool:
-        return bool(self.openai_api_key and self.openai_api_key.get_secret_value())
+        return bool(self.gemini_api_key and self.gemini_api_key.get_secret_value())
 
     @property
     def neo4j_configured(self) -> bool:
         return bool(self.neo4j_uri and self.neo4j_password.get_secret_value())
+
+
+def shadowed_env_names(env_file: Path | None = ROOT_ENV_FILE) -> list[str]:
+    """Names (never values) of variables exported in the shell with a value that differs from
+    the .env file. The .env value wins; this only makes the conflict visible."""
+    if not env_file or not Path(env_file).is_file():
+        return []
+    from dotenv import dotenv_values  # dependency of pydantic-settings
+
+    file_values = dotenv_values(env_file)
+    env = {k.upper(): v for k, v in os.environ.items()}
+    return sorted(k for k, v in file_values.items()
+                  if v is not None and k.upper() in env and env[k.upper()] != v)
 
 
 @lru_cache

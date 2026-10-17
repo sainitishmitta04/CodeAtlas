@@ -11,7 +11,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "sample_repo"
 @pytest.fixture
 def offline_settings() -> Settings:
     # never read the real .env in unit tests
-    return Settings(_env_file=None, neo4j_uri="", openai_api_key=None)
+    return Settings(_env_file=None, neo4j_uri="", gemini_api_key=None)
 
 
 @pytest.fixture

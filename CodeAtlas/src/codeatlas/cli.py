@@ -30,6 +30,7 @@ def catalog() -> dict[str, str]:
         "list_files": queries.LIST_FILES, "list_functions": queries.LIST_FUNCTIONS,
         "overview_all": queries.overview_query(list(queries.LABELS)),
         "overview_files": queries.overview_query(["File"]),
+        "overview_rel_variants": queries._rel_variant_counts_query(),
         "find_entities": queries.FIND_ENTITIES,
         "impact_defined": queries.IMPACT_DEFINED,
         "impact_importers": queries.IMPACT_IMPORTERS % 3,

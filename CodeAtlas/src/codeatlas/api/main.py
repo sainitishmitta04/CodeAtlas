@@ -8,13 +8,14 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from codeatlas.analysis.scanner import ScanError
-from codeatlas.config import get_settings
+from codeatlas.config import ROOT_ENV_FILE, get_settings, shadowed_env_names
 from codeatlas.graph import db, queries
 from codeatlas.graph.db import GraphDBError
 from codeatlas.graph.sync import CapacityError, SyncConflict
 from codeatlas.models import (AnalysisReport, AnalyzeRequest, Answer, AskRequest,
                               GithubAnalyzeRequest, GraphPayload)
-from codeatlas.qa.answer import answer_question
+from codeatlas.llm import client as llm_client
+from codeatlas.qa.answer import AnswerFailed, answer_question
 from codeatlas.sources import service
 from codeatlas.sources.archive import temp_workspace
 from codeatlas.sources.errors import SourceError, SourceTooLarge
@@ -31,14 +32,27 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="CodeAtlas API", version="0.1.0", lifespan=lifespan)
 
 
+# Every error body carries `component` (neo4j | llm | github | source | api) so clients can
+# tell which dependency failed. Messages are user-safe; no credentials are ever included.
+
 @app.exception_handler(GraphDBError)
 async def _db_error(_, exc: GraphDBError):
-    return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
+    return JSONResponse(status_code=exc.status, content={"detail": str(exc), "component": "neo4j"})
 
 
 @app.exception_handler(queries.QueryInputError)
 async def _input_error(_, exc: queries.QueryInputError):
-    return JSONResponse(status_code=400, content={"detail": str(exc)})
+    return JSONResponse(status_code=400, content={"detail": str(exc), "component": "api"})
+
+
+@app.exception_handler(AnswerFailed)
+async def _answer_failed(_, exc: AnswerFailed):
+    """The graph retrieval worked but the LLM did not answer: an honest non-2xx response that
+    still carries the retrieved graph facts, explicitly marked as not being an answer."""
+    detail = {**exc.error.to_dict(), "code": f"llm_{exc.error.code}", "component": "llm",
+              "graph_context": exc.partial.model_dump(mode="json")}
+    return JSONResponse(status_code=exc.error.http_status,
+                        content={"detail": detail, "component": "llm"})
 
 
 @app.exception_handler(SourceError)
@@ -48,14 +62,21 @@ async def _source_error(_, exc: SourceError):
                   "target": exc.target.model_dump(mode="json")}
     else:
         detail = exc.message
-    return JSONResponse(status_code=exc.status, content={"detail": detail})
+    return JSONResponse(status_code=exc.status,
+                        content={"detail": detail, "component": exc.component})
 
 
 @app.get("/health")
 def health() -> dict:
+    """Lightweight: pings Neo4j, but never calls the LLM provider. `llm.last_call` is the
+    outcome of the most recent real /ask ('unknown' until one is made), so a configured key
+    is not presented as a working one."""
     s = get_settings()
     return {"neo4j": db.ping() if s.neo4j_configured else {"ok": False, "error": "not configured"},
-            "llm_configured": s.llm_configured, "model": s.openai_model,
+            "llm_configured": s.llm_configured, "model": s.gemini_model,
+            "llm": {**llm_client.config_summary(s), "last_call": llm_client.status_snapshot()},
+            "config": {"env_file_found": ROOT_ENV_FILE is not None,
+                       "shell_vars_ignored_in_favour_of_env_file": shadowed_env_names()},
             "max_upload_bytes": s.max_archive_bytes}
 
 
@@ -150,8 +171,11 @@ def functions(pid: str) -> list[dict]:
 @app.get("/graph/overview", response_model=GraphPayload)
 def graph_overview(project_id: str, labels: list[str] = Query(default=list(queries.LABELS)),
                    rel_types: list[str] = Query(default=list(queries.REL_TYPES)),
-                   limit: int = 150) -> GraphPayload:
-    return queries.overview(project_id, labels, rel_types, limit)
+                   limit: int = queries.OVERVIEW_PAGE_SIZE, after: str = "",
+                   include_totals: bool | None = None) -> GraphPayload:
+    """One page of the project's graph (`limit` = page size). Repeat with
+    `after=<next_cursor>` until `complete` is true to obtain the complete graph."""
+    return queries.overview(project_id, labels, rel_types, limit, after, include_totals)
 
 
 @app.get("/graph/neighborhood", response_model=GraphPayload)

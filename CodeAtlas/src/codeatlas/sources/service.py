@@ -122,7 +122,11 @@ def analyze_local(req: AnalyzeRequest, settings: Settings) -> AnalysisReport:
 def analyze_github(req: GithubAnalyzeRequest, settings: Settings) -> AnalysisReport:
     spec = github.parse_github_url(req.url, req.ref)  # validated before any request
     with github.make_client(settings) as client:
-        repo = github.resolve_repo(client, spec)
+        try:
+            repo = github.resolve_repo(client, spec)
+        except SourceError as exc:
+            exc.component = "github"
+            raise
         target = SourceTarget(
             kind="github", label=repo.label, identity=repo.identity,
             project_id=ids.project_id_for_identity(repo.identity, repo.repo),
@@ -132,7 +136,11 @@ def analyze_github(req: GithubAnalyzeRequest, settings: Settings) -> AnalysisRep
         guard(target, req.dry_run, req.expected_project_id, req.confirm_update)
         with temp_workspace(settings) as work:
             archive = work / "repo.zip"
-            github.download_archive(client, repo, archive, settings.max_archive_bytes)
+            try:
+                github.download_archive(client, repo, archive, settings.max_archive_bytes)
+            except SourceError as exc:
+                exc.component = "github"
+                raise
             res = extract_zip(archive, work / "src", ArchiveLimits.from_settings(settings))
             archive.unlink(missing_ok=True)
             target.fingerprint = res.fingerprint

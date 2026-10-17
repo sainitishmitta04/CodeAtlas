@@ -8,7 +8,7 @@ import re
 
 from codeatlas.graph import queries
 from codeatlas.graph.payload import PayloadBuilder, merge_payloads
-from codeatlas.llm.client import LLMUnavailable, chat
+from codeatlas.llm.client import LLMError, chat
 from codeatlas.models import Answer, GNode, GraphPayload
 
 MAX_FACT_NODES = 40
@@ -29,7 +29,10 @@ STOPWORDS = set("""what which who whom does do is are the this that these those 
 modules function functions class classes repository repo project code depends depend on of in
 to for and or if change changes changed could be affected affect connected component with from
 main contain contains functionality where how why when it its me show list tell about uses use
-used calls call by""".split())
+used calls call by related linked around neighbour neighbor neighbors interacts impact impacts
+break breaks ripple radius blast dependents dependent imported imports importers import caller
+callers called inherits inherit subclasses defines define symbols symbol any all have has
+happen happens""".split())
 SYSTEM_PROMPT = """You are CodeAtlas, an assistant that answers questions about a code repository
 using ONLY the graph facts provided (retrieved from a Neo4j code graph).
 Rules:
@@ -55,10 +58,9 @@ def candidate_terms(question: str) -> list[str]:
     terms = [t for group in quoted for t in group if t]
     for tok in re.findall(r"[A-Za-z_][\w./]*", question):
         tok = tok.strip("./")
-        if not tok or tok.lower() in STOPWORDS:
+        if len(tok) < 2 or tok.lower() in STOPWORDS:  # short names (db, api, cli) are valid
             continue
-        if "/" in tok or "." in tok or "_" in tok or re.search(r"[a-z][A-Z]", tok) or len(tok) > 3:
-            terms.append(tok)
+        terms.append(tok)
     seen, out = set(), []
     for t in terms:  # prefer path-like / code-like tokens first
         if t.lower() not in seen:
@@ -74,21 +76,32 @@ def _gnode(node) -> GNode:
     return b.build().nodes[0]
 
 
+def _code_like(term: str) -> bool:
+    return bool("/" in term or "." in term or "_" in term or re.search(r"[a-z][A-Z]", term)
+                or len(term) > 3)
+
+
 def resolve_entity(pid: str, question: str, focus_label: str | None,
                    focus_id: str | None) -> GNode | None:
-    best = None
+    """Pick the node a question is about. Order: an explicit name in the question (exact name
+    or path suffix, score >= 2); else the node selected in the graph; else a weak substring
+    match, but only for code-like words, so an ordinary word cannot pick a random file."""
+    best, weak = None, None
     for term in candidate_terms(question):
         for node, score in queries.find_entities(pid, term):
-            if best is None or score > best[1]:
+            if score >= 2 and (best is None or score > best[1]):
                 best = (node, score)
+            if score < 2 and _code_like(term) and weak is None:
+                weak = node
         if best and best[1] >= 3:
             break
     if best:
         return _gnode(best[0])
     if focus_label and focus_id:
         node = queries.get_node(focus_label, focus_id)
-        return _gnode(node) if node is not None else None
-    return None
+        if node is not None:
+            return _gnode(node)
+    return _gnode(weak) if weak is not None else None
 
 
 # ------------------------------------------------------------------ fact rendering
@@ -203,6 +216,15 @@ def _bounded(facts: list[str]) -> list[str]:
     return out
 
 
+class AnswerFailed(RuntimeError):
+    """The graph was queried, but the LLM could not write the answer. Carries the retrieved
+    facts/evidence so the UI can show them, clearly labelled as *not* an answer."""
+
+    def __init__(self, error: LLMError, partial: Answer):
+        super().__init__(error.message)
+        self.error, self.partial = error, partial
+
+
 def answer_question(pid: str, question: str, focus_label: str | None = None,
                     focus_id: str | None = None) -> Answer:
     proj = queries.project(pid)
@@ -214,7 +236,7 @@ def answer_question(pid: str, question: str, focus_label: str | None = None,
         return Answer(intent=intent, answer=(
             "I could not identify which file, class or function you mean. Mention it by name "
             "(e.g. `graph/db.py` or `sync_project`) or select a node in the graph first."),
-            llm_used=False)
+            llm_used=False, kind="clarification")
 
     facts, evidence, caveats = _retrieve(intent, pid, entity)
     if proj.get("sync_status") != "complete":
@@ -224,12 +246,11 @@ def answer_question(pid: str, question: str, focus_label: str | None = None,
     user = (f"Question: {question}\nIntent: {intent}\nProject: {proj.get('name')}\n\n"
             "Graph facts:\n" + "\n".join(f"- {f}" for f in facts) +
             "\n\nCoverage caveats:\n" + "\n".join(f"- {c}" for c in caveats))
-    try:
-        text, used = chat(SYSTEM_PROMPT, user), True
-    except LLMUnavailable as exc:
-        text = (f"_{exc} Showing the facts retrieved from Neo4j instead._\n\n" +
-                "\n".join(f"- {f}" for f in facts[:30]))
-        used = False
     evidence = merge_payloads(GraphPayload(), evidence)
-    return Answer(intent=intent, entity=entity, answer=text, llm_used=used, facts=facts,
+    try:
+        text = chat(SYSTEM_PROMPT, user)
+    except LLMError as exc:
+        raise AnswerFailed(exc, Answer(intent=intent, entity=entity, answer="", llm_used=False,
+                                       facts=facts, caveats=caveats, evidence=evidence)) from None
+    return Answer(intent=intent, entity=entity, answer=text, llm_used=True, facts=facts,
                   caveats=caveats, evidence=evidence)

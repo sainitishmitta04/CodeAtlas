@@ -17,6 +17,9 @@ from st_link_analysis.component.styles import LinkAnalysisDeprecationWarning
 warnings.filterwarnings("ignore", category=LinkAnalysisDeprecationWarning)
 
 API = os.environ.get("CODEATLAS_API_URL", "http://127.0.0.1:8000")
+# The Graph tab loads pages automatically up to this many nodes; beyond it, loading the rest
+# is an explicit click (very large graphs make the browser layout slow).
+AUTO_LOAD_MAX_NODES = int(os.environ.get("CODEATLAS_AUTO_LOAD_NODES", "2000"))
 LABELS = ["Project", "File", "Module", "Class", "Function"]
 REL_TYPES = ["CONTAINS", "DEFINES", "HAS_METHOD", "IMPORTS", "INHERITS", "CALLS"]
 NODE_STYLES = [
@@ -61,7 +64,10 @@ def api_raw(method: str, path: str, timeout: float = 60, **kw) -> tuple[int | No
     except ValueError:
         body = r.text
     if r.status_code >= 400 and isinstance(body, dict) and "detail" in body:
+        component = body.get("component")
         body = body["detail"]
+        if isinstance(body, str) and component:
+            body = f"[{component}] {body}"  # which dependency failed: neo4j, llm, github, ...
     return r.status_code, body
 
 
@@ -316,7 +322,21 @@ with st.sidebar:
         neo = health["neo4j"]
         st.write(("🟢" if neo.get("ok") else "🔴") + " Neo4j" +
                  ("" if neo.get("ok") else f": {neo.get('error')}"))
-        st.write(("🟢" if health["llm_configured"] else "⚪") + f" LLM ({health['model']})")
+        llm = health.get("llm") or {"configured": health["llm_configured"]}
+        last = llm.get("last_call") or {}
+        if not llm.get("configured"):
+            st.write(f"⚪ LLM ({health['model']}): not configured")
+        elif last.get("state") == "ok":
+            st.write(f"🟢 LLM ({health['model']}): last call OK")
+        elif last.get("state") == "failed":
+            st.write(f"🔴 LLM ({health['model']}): last call failed: {last.get('code')}"
+                     + (f" (HTTP {last['provider_status']})" if last.get("provider_status") else ""))
+        else:
+            st.write(f"⚪ LLM ({health['model']}): configured, not verified yet")
+        ignored = (health.get("config") or {}).get("shell_vars_ignored_in_favour_of_env_file")
+        if ignored:
+            st.caption("Shell variables ignored in favour of the workspace .env: "
+                       + ", ".join(ignored))
 
     projects = api("GET", "/projects", timeout=20) or []
     ingest_panel(projects, (health or {}).get("max_upload_bytes"))
@@ -333,12 +353,15 @@ with st.sidebar:
     if ss.get("project_id") != proj["id"]:
         ss.project_id, ss.graph, ss.selected = proj["id"], None, None
     st.subheader("Filters")
-    labels = st.multiselect("Node types", LABELS, default=["Project", "File", "Class", "Function"])
+    labels = st.multiselect("Node types", LABELS, default=LABELS)
     rels = st.multiselect("Relationship types", REL_TYPES, default=REL_TYPES)
-    limit = st.slider("Max nodes", 20, 400, 150, step=10)
+    page_size = st.slider("Nodes per page", 100, 2000, 500, step=100,
+                          help="The graph is loaded page by page until it is complete; pages "
+                               f"load automatically up to {AUTO_LOAD_MAX_NODES} nodes.")
+    st.caption("A relationship is drawn when both of its endpoints' node types are selected.")
     depth = st.slider("Expansion depth", 1, 3, 1)
     if st.button("Reload graph"):
-        ss.graph = None
+        ss.graph, ss.graph_meta = None, {}
 
 pid = proj["id"]
 if proj.get("sync_status") != "complete":
@@ -348,10 +371,71 @@ if proj.get("sync_status") != "complete":
 tab_graph, tab_stats, tab_paths, tab_ask = st.tabs(["Graph", "Statistics", "Paths & impact", "Ask"])
 
 # ------------------------------------------------------------------ graph tab
+
+def load_graph_pages(until_nodes: int) -> None:
+    """Load overview pages from the current cursor until the selection is complete or
+    `until_nodes` selected nodes are loaded. Pages merge into ss.graph by node/edge id."""
+    meta = ss.graph_meta
+    for _ in range(1000):  # hard stop; a page always advances the cursor
+        if meta.get("complete") or (ss.graph is not None and not meta.get("cursor")):
+            return
+        page = api("GET", "/graph/overview", params={
+            "project_id": pid, "labels": labels, "rel_types": rels, "limit": page_size,
+            "after": meta.get("cursor") or ""})
+        if page is None:
+            meta["error"] = True
+            return
+        ss.graph = page if ss.graph is None else merge(ss.graph, page)
+        meta["totals"] = page.get("totals") or meta.get("totals")
+        meta["cursor"], meta["complete"] = page.get("next_cursor"), bool(page.get("complete"))
+        meta["loaded"] = meta.get("loaded", 0) + (page.get("page_nodes") or 0)
+        ss.graph["truncated"], ss.graph["note"] = not meta["complete"], None
+        if meta["loaded"] >= until_nodes:
+            return
+
+
+def graph_status() -> None:
+    """Displayed vs total counts, and whether the full selection has been loaded."""
+    meta, g = ss.graph_meta, ss.graph or {"nodes": [], "edges": []}
+    totals = meta.get("totals") or {}
+    shown_nodes, shown_edges = len(g["nodes"]), len(g["edges"])
+    if meta.get("mode") == "neighbourhood":
+        st.info(f"Neighbourhood view ({shown_nodes} nodes, {shown_edges} relationships), not "
+                "the full graph. Click **Reload graph** to return to the complete graph.")
+        return
+    sel_n, sel_r = totals.get("selected_nodes"), totals.get("selected_relationships")
+    text = (f"Displayed **{shown_nodes}** nodes / {sel_n if sel_n is not None else '?'} selected "
+            f"· **{shown_edges}** relationships / {sel_r if sel_r is not None else '?'} selected")
+    if meta.get("complete"):
+        st.success("✅ Complete graph for the selected types. " + text)
+    else:
+        remaining = (sel_n - meta.get("loaded", 0)) if sel_n is not None else None
+        st.warning("⚠️ Partial view: more data remains to be loaded. " + text +
+                   (f" · {remaining} more nodes" if remaining is not None else ""))
+        c1, c2 = st.columns(2)
+        if c1.button("Load next page"):
+            load_graph_pages(meta.get("loaded", 0) + 1)
+            st.rerun()
+        if c2.button("Load all remaining", help="May be slow to lay out for very large graphs."):
+            load_graph_pages(10 ** 9)
+            st.rerun()
+    notes = [f"Project total: {totals.get('nodes', '?')} nodes, "
+             f"{totals.get('relationships', '?')} relationships."]
+    if totals.get("hidden_relationships"):
+        notes.append(f"{totals['hidden_relationships']} relationships are hidden because one "
+                     "endpoint's node type is not selected.")
+    st.caption(" ".join(notes))
+
+
 with tab_graph:
-    if ss.graph is None and labels:
-        ss.graph = api("GET", "/graph/overview", params={
-            "project_id": pid, "labels": labels, "rel_types": rels, "limit": limit})
+    graph_key = (pid, tuple(labels), tuple(rels), page_size)
+    if ss.get("graph_meta", {}).get("key") != graph_key:
+        ss.graph, ss.graph_meta = None, {"key": graph_key, "mode": "overview"}
+    if ss.graph is None and labels and not ss.graph_meta.get("error"):
+        ss.graph_meta = {"key": graph_key, "mode": "overview"}
+        load_graph_pages(AUTO_LOAD_MAX_NODES)
+    if ss.graph is not None or ss.graph_meta.get("totals"):
+        graph_status()
     col_g, col_p = st.columns([3, 1])
     with col_g:
         event = show_graph(ss.graph, key=f"main-{pid}")
@@ -393,6 +477,7 @@ with tab_graph:
                 ss.graph = api("GET", "/graph/neighborhood", params={
                     "label": node["label"], "node_id": node["id"], "depth": depth,
                     "rel_types": rels, "limit": 120})
+                ss.graph_meta["mode"] = "neighbourhood"
                 st.rerun()
         else:
             st.caption("Click a node to inspect it; double-click (or the expand button in the "
@@ -480,14 +565,46 @@ with tab_ask:
     question = st.text_input("Question", key="question")
     if st.button("Ask", type="primary") and question:
         with st.spinner("Retrieving from Neo4j and asking the model..."):
-            ss.answer = api("POST", "/ask", timeout=120, json={
+            code, body = api_raw("POST", "/ask", timeout=150, json={
                 "project_id": pid, "question": question,
                 "focus_id": sel["id"] if sel else None, "focus_label": sel["label"] if sel else None})
+        if code is not None and code < 400:
+            ss.answer, ss.ask_error = body, None
+        else:
+            ss.answer = None
+            ss.ask_error = ({**body, "http_status": code} if isinstance(body, dict)
+                            else {"message": error_text(code, body), "http_status": code})
+        st.rerun()  # refresh the sidebar's LLM status with this call's outcome
+    err = ss.get("ask_error")
+    if err:
+        if err.get("component") == "llm":
+            st.error(f"**No answer: the LLM request failed** (`{err.get('code')}`"
+                     + (f", provider HTTP {err['provider_status']}" if err.get("provider_status")
+                        else "") + f"). {err.get('message', '')}")
+            if err.get("hint"):
+                st.info(err["hint"])
+        else:
+            st.error(f"**No answer.** {err.get('message')}")
+        diag = {k: err.get(k) for k in ("code", "component", "http_status", "provider_status",
+                                         "request_id", "provider_message", "attempts",
+                                         "retryable") if err.get(k) is not None}
+        with st.expander("Diagnostics (contains no credentials)"):
+            st.json(diag)
+        ctx = err.get("graph_context")
+        if ctx:
+            st.markdown("**Graph facts retrieved from Neo4j (not an LLM answer)**")
+            with st.expander(f"Evidence facts ({len(ctx.get('facts', []))})", expanded=True):
+                st.code("\n".join(ctx.get("facts", [])) or "(no facts)")
+            show_graph(ctx.get("evidence") or {}, key=f"ask-failed-{pid}", height=380,
+                       actions=False)
     ans = ss.get("answer")
-    if ans:
+    if ans and ans.get("kind") == "clarification":
+        st.info(ans["answer"])
+        st.caption("CodeAtlas needs a clearer target; the LLM was not called.")
+    elif ans:
         st.caption(f"intent: {ans['intent']} · entity: "
                    f"{ans['entity']['caption'] if ans.get('entity') else '—'} · "
-                   f"LLM used: {ans['llm_used']}")
+                   f"answer written by the LLM from {len(ans['facts'])} graph facts")
         st.markdown(ans["answer"])
         if ans["caveats"]:
             with st.expander("Caveats"):

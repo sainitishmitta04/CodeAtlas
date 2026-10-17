@@ -4,6 +4,7 @@
 class SourceError(Exception):
     status = 400
     code = "invalid_source"
+    component = "source"  # "github" when raised while talking to GitHub
 
     def __init__(self, message: str):
         super().__init__(message)
