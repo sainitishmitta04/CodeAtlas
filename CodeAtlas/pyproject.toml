@@ -18,6 +18,9 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
 ]
 
+[tool.vercel]
+entrypoint = "src.codeatlas.api.main:app"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
