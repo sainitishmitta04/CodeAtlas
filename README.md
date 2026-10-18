@@ -29,9 +29,6 @@ Load a repository from a local folder, a public GitHub URL or a ZIP file. Then:
 - follow **guided tours** and get a **plain-language explanation** of any symbol;
 - **search** the code by describing it, and ask **grounded questions** whose answers cite the graph.
 
-> **GitHub "About" settings** (for the repository page): *Neo4j-powered code knowledge graph: parse repositories with tree-sitter, query dependencies, calls and architecture in Cypher, explore in a web UI.*
-> Suggested topics: `neo4j`, `knowledge-graph`, `code-analysis`, `tree-sitter`, `static-analysis`, `fastapi`, `react`, `typescript`, `python`, `javascript`, `dependency-graph`, `code-graph`.
-
 ---
 
 ## Quick start
