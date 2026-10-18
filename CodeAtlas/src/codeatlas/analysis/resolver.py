@@ -29,10 +29,33 @@ from datetime import datetime, timezone
 
 from codeatlas import ids
 from codeatlas.models import (
-    FileAnalysis, GraphRows, NodeRow, RelRow, ResolutionStats, ScanResult, Symbol,
+    FileAnalysis, GraphRows, ImportStmt, NodeRow, RelRow, ResolutionStats, ScanResult, Symbol,
 )
 
 BUILTINS = set(dir(builtins))
+JS_EXTENSIONS = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+JS_ASSET_EXTENSIONS = {".css", ".scss", ".sass", ".less", ".svg", ".png", ".jpg", ".jpeg",
+                       ".gif", ".webp", ".json", ".html", ".woff", ".woff2", ".ttf"}
+
+
+def _family(language: str) -> str:
+    """JavaScript and TypeScript share one namespace, so a .ts file can import a .js file."""
+    return "python" if language == "python" else "javascript"
+
+
+def _gkey(analysis: FileAnalysis, name: str) -> str:
+    return f"{_family(analysis.language)}:{name}"
+
+
+def _ctor(analysis: FileAnalysis) -> str:
+    """Name of a class's constructor method in this language."""
+    return "__init__" if analysis.language == "python" else "constructor"
+
+
+def _package_name(spec: str) -> str:
+    """'@scope/pkg/sub' -> '@scope/pkg'; 'pkg/sub' -> 'pkg'."""
+    parts = spec.split("/")
+    return "/".join(parts[:2]) if spec.startswith("@") and len(parts) > 1 else parts[0]
 MAX_UNRESOLVED_LISTED = 30
 MAX_INHERIT_DEPTH = 5
 
@@ -64,12 +87,13 @@ class _Resolver:
             module, root = self._module_name(a.path)
             ctx = _FileCtx(a, module, root, by_qualname={s.qualname: s for s in a.symbols})
             self.ctx[a.path] = ctx
-            if module:
-                self.module_index[module].append(a.path)
-            full = a.path[:-3].replace("/", ".")
-            full = full[: -len(".__init__")] if full.endswith(".__init__") else full
-            if full and full != module:
-                self.module_index[full].append(a.path)
+            if a.language == "python":  # JS/TS imports are resolved by path, not dotted name
+                if module:
+                    self.module_index[module].append(a.path)
+                full = a.path[:-3].replace("/", ".")
+                full = full[: -len(".__init__")] if full.endswith(".__init__") else full
+                if full and full != module:
+                    self.module_index[full].append(a.path)
 
         # symbol tables
         self.top_funcs: dict[str, dict[str, str]] = defaultdict(dict)
@@ -85,14 +109,14 @@ class _Resolver:
                     self.class_paths[cid] = (path, s)
                     if s.qualname == s.name:
                         self.top_classes[path][s.name] = cid
-                        self.global_classes[s.name].append(cid)
+                        self.global_classes[_gkey(c.analysis, s.name)].append(cid)
                 else:
                     fid = ids.function_id(pid, path, s.qualname)
                     if s.parent_class:
                         self.methods[ids.class_id(pid, path, s.parent_class)][s.name] = fid
                     elif s.qualname == s.name:
                         self.top_funcs[path][s.name] = fid
-                        self.global_funcs[s.name].append(fid)
+                        self.global_funcs[_gkey(c.analysis, s.name)].append(fid)
         self.inherits: dict[str, list[str]] = defaultdict(list)  # class id -> base class ids
 
     # ------------------------------------------------------------ modules
@@ -142,6 +166,10 @@ class _Resolver:
         for path, c in self.ctx.items():
             src = ids.file_id(self.pid, path)
             dir_parts = path.split("/")[:-1]
+            if c.analysis.language != "python":
+                for imp in c.analysis.imports:
+                    self._js_import(c, src, imp, add, modules)
+                continue
             for imp in c.analysis.imports:
                 if imp.kind == "import":
                     for mod, alias in imp.names:
@@ -204,6 +232,57 @@ class _Resolver:
                     self._external(c, src, imp.module, imp.line, leftover, None, add, modules)
         return edges, modules
 
+    def _js_import(self, c: _FileCtx, src: str, imp: ImportStmt, add, modules):
+        """import/export-from/require() of a JavaScript or TypeScript file."""
+        names = [n for n, _ in imp.names]
+        if not imp.module.startswith("."):  # a package, or a Node built-in
+            pkg = _package_name(imp.module)
+            mid = ids.module_id(self.pid, pkg)
+            modules[mid] = "external"
+            add(src, mid, imp.line, names, "external")
+            self.stats.imports_external += 1
+            for name, alias in imp.names:
+                if alias or name != "*":
+                    c.bindings[alias or name] = _Binding("external")
+            return
+        here = posixpath.dirname(c.analysis.path)
+        target = self._js_file(posixpath.normpath(posixpath.join(here, imp.module)))
+        if target is None and posixpath.splitext(imp.module)[1].lower() in JS_ASSET_EXTENSIONS:
+            return  # stylesheets, images and data are not code: no node, no warning
+        if target is None:  # relative path that matches no scanned file
+            self._unresolved(src, imp.module, imp.line, names, add, modules)
+            return
+        if target != c.analysis.path:
+            add(src, ids.file_id(self.pid, target), imp.line, names, "resolved")
+            self.stats.imports_resolved += 1
+        for name, alias in imp.names:
+            local = alias or name
+            if local == "*":  # bare `require("x")` / `import "x"`: nothing to bind
+                continue
+            if name == "*" or imp.kind == "import":  # namespace import or require()
+                c.bindings[local] = _Binding("module", target)
+            else:
+                c.bindings[local] = _Binding("symbol", target, name)
+
+    def _js_file(self, base: str) -> str | None:
+        """Project file for a module path with or without an extension, as Node and
+        TypeScript resolve them: exact, + extension, /index + extension, and TypeScript's
+        `./x.js` -> `./x.ts` convention."""
+        if base in self.paths:
+            return base
+        for ext in JS_EXTENSIONS:
+            if base + ext in self.paths:
+                return base + ext
+        for ext in JS_EXTENSIONS:
+            if f"{base}/index{ext}" in self.paths:
+                return f"{base}/index{ext}"
+        stem, dot, ext = base.rpartition(".")
+        if dot and f".{ext}" in (".js", ".jsx", ".mjs", ".cjs"):
+            for alt in JS_EXTENSIONS:
+                if stem + alt in self.paths:
+                    return stem + alt
+        return None
+
     def _external(self, c, src, mod, line, names, bind_as, add, modules):
         if self._is_internal_top(mod):
             self._unresolved(src, mod, line, names, add, modules)
@@ -234,8 +313,8 @@ class _Resolver:
                 return self.top_classes[b.path][b.symbol], "exact"
             if (b and b.kind == "external") or (not b and expr in BUILTINS):
                 return None, "external"
-            if len(self.global_classes.get(expr, [])) == 1 and not b:
-                return self.global_classes[expr][0], "name_match"
+            if len(self.global_classes.get(_gkey(c.analysis, expr), [])) == 1 and not b:
+                return self.global_classes[_gkey(c.analysis, expr)][0], "name_match"
             return None, "unresolved"
         recv, _, attr = expr.rpartition(".")
         b = c.bindings.get(recv)
@@ -293,7 +372,7 @@ class _Resolver:
             if callee in self.top_funcs[path]:
                 return self.top_funcs[path][callee], "exact", "same_file"
             if callee in self.top_classes[path]:
-                init = self._method_in_hierarchy(self.top_classes[path][callee], "__init__")
+                init = self._method_in_hierarchy(self.top_classes[path][callee], _ctor(c.analysis))
                 return (init, "exact", "constructor") if init else (None, "unresolved", "")
             b = c.bindings.get(callee)
             if b is not None:
@@ -301,26 +380,26 @@ class _Resolver:
                     if b.symbol in self.top_funcs.get(b.path, {}):
                         return self.top_funcs[b.path][b.symbol], "exact", "import"
                     if b.symbol in self.top_classes.get(b.path, {}):
-                        init = self._method_in_hierarchy(self.top_classes[b.path][b.symbol], "__init__")
+                        init = self._method_in_hierarchy(self.top_classes[b.path][b.symbol], _ctor(c.analysis))
                         if init:
                             return init, "exact", "constructor"
                     return None, "unresolved", ""
                 return None, "external" if b.kind == "external" else "unresolved", ""
             if callee in BUILTINS:
                 return None, "builtin", ""
-            funcs = self.global_funcs.get(callee, [])
-            classes = self.global_classes.get(callee, [])
+            funcs = self.global_funcs.get(_gkey(c.analysis, callee), [])
+            classes = self.global_classes.get(_gkey(c.analysis, callee), [])
             if len(funcs) + len(classes) > 1:
                 return None, "ambiguous", ""
             if len(funcs) == 1:
                 return funcs[0], "name_match", "global_name"
             if len(classes) == 1:
-                init = self._method_in_hierarchy(classes[0], "__init__")
+                init = self._method_in_hierarchy(classes[0], _ctor(c.analysis))
                 if init:
                     return init, "name_match", "global_name"
             return None, "unresolved", ""
 
-        if receiver in ("self", "cls") and caller.parent_class:
+        if receiver in ("self", "cls", "this") and caller.parent_class:
             cid = ids.class_id(self.pid, path, caller.parent_class)
             target = self._method_in_hierarchy(cid, callee)
             return (target, "exact", "self") if target else (None, "unresolved", "")
@@ -331,7 +410,7 @@ class _Resolver:
             if callee in self.top_funcs.get(b.path, {}):
                 return self.top_funcs[b.path][callee], "exact", "module_attr"
             if callee in self.top_classes.get(b.path, {}):
-                init = self._method_in_hierarchy(self.top_classes[b.path][callee], "__init__")
+                init = self._method_in_hierarchy(self.top_classes[b.path][callee], _ctor(c.analysis))
                 if init:
                     return init, "exact", "constructor"
             return None, "unresolved", ""
@@ -399,7 +478,7 @@ def build_graph(scan: ScanResult, analyses: list[FileAnalysis], pid: str,
         fid = ids.file_id(pid, a.path)
         files.append(NodeRow(id=fid, props={
             "path": a.path, "name": posixpath.basename(a.path), "module": c.module,
-            "language": "python", "sha256": a.sha256, "size_bytes": a.size_bytes, "loc": a.loc,
+            "language": a.language, "sha256": a.sha256, "size_bytes": a.size_bytes, "loc": a.loc,
             "docstring": a.docstring, "has_syntax_errors": a.has_syntax_errors,
             "symbol_count": len(a.symbols), "import_count": len(a.imports),
         }))
@@ -444,7 +523,7 @@ def build_graph(scan: ScanResult, analyses: list[FileAnalysis], pid: str,
     inherits = [RelRow(source=s, target=t, props=p) for (s, t), p in sorted(inherit_edges.items())]
 
     project = NodeRow(id=pid, props={
-        "name": project_name, "root_path": scan.root, "languages": ["python"],
+        "name": project_name, "root_path": scan.root, "languages": sorted({a.language for a in analyses}),
         "file_count": len(files), "analyzed_at": datetime.now(timezone.utc).isoformat(),
     })
     rows = GraphRows(

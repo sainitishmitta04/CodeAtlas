@@ -89,7 +89,7 @@ All three go through the same pipeline and the same safety checks.
 - **Explicit confirmation to write.** Updating an existing project needs a second confirmation. A write can only affect the project you picked.
 - **Re-analyze any time.** Same GitHub URL and ref means the same project, updated in place.
 
-> **Language support:** CodeAtlas currently analyzes **Python** (`.py`) files. A repository in any of the formats above can be loaded, but only its Python code becomes graph nodes. Other files are ignored. See [Limits](#limits).
+> **Language support:** CodeAtlas analyzes **Python** (`.py`), **JavaScript** (`.js`, `.jsx`, `.mjs`, `.cjs`) and **TypeScript** (`.ts`, `.tsx`, `.mts`, `.cts`) files. Any repository in the formats above can be loaded; other languages' files are ignored. See [Limits](#limits) and [docs/LANGUAGES.md](CodeAtlas/docs/LANGUAGES.md).
 
 ### 🧭 2. Explore the graph
 
@@ -236,7 +236,8 @@ python -m codeatlas.cli delete-project PROJECT_ID --yes    # removes only that p
 
 ## 📏 Limits
 
-- **Python only for now.** Analysis is static (no dynamic imports, reflection or runtime traces) and does not infer types for `obj.method()` calls. TypeScript and JavaScript are not yet supported.
+- **Three language families for now:** Python, JavaScript and TypeScript (including TSX/JSX). Other languages (Java, Go, Rust, and so on) are not yet supported. See [docs/LANGUAGES.md](CodeAtlas/docs/LANGUAGES.md) for what each language covers.
+- **Static analysis only.** No runtime traces, reflection or dynamic `import()` with computed paths, and no type inference for `obj.method()` calls.
 - **Public GitHub repositories only.** Private repositories aren't supported. Unauthenticated GitHub rate limits apply (60 requests per hour).
 - **Size caps (AuraDB Free):** 1,500 files, 25,000 nodes and 60,000 relationships per project. Queries time out after 30 s. Views are capped at depth 3 and 400 nodes.
 - **Layers are heuristic**, and **search is lexical plus graph**, not embedding-based. A Neo4j vector index is a natural next step.

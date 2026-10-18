@@ -259,7 +259,10 @@ def _file_evidence(snap: Snapshot, f: dict, importers: int, internal_imports: in
         hit = sorted(name_tokens & hints)
         if hit:
             acc.add(layer, "name", f"path contains '{hit[0]}'")
-    if posixpath.basename(path).startswith("test_") or path.endswith("_test.py"):
+    base = posixpath.basename(path)
+    js_test = base.rsplit(".", 1)[-1] in ("js", "jsx", "ts", "tsx", "mjs", "cjs") and (
+        ".test." in base or ".spec." in base or "/__tests__/" in f"/{path}")
+    if base.startswith("test_") or path.endswith("_test.py") or js_test:
         acc.add("tests", "test_name", "test file name")
 
     for e in snap.out_edges(f["id"], "IMPORTS"):

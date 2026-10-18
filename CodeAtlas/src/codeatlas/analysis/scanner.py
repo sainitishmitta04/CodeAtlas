@@ -8,7 +8,7 @@ import pathspec
 
 from codeatlas.models import ScannedFile, ScanResult, SkippedFile
 
-SUPPORTED_EXTENSIONS = {".py": "python"}
+from codeatlas.analysis.languages import EXTENSION_LANGUAGES as SUPPORTED_EXTENSIONS  # noqa: E402
 
 IGNORED_DIRS = {
     ".git", ".hg", ".svn", ".venv", "venv", "env", ".env", "node_modules", "__pycache__",
@@ -16,7 +16,8 @@ IGNORED_DIRS = {
     "dist", "build", "out", "target", "site-packages", ".eggs", "coverage", "htmlcov",
     ".next", ".ua", ".understand-anything",
 }
-IGNORED_SUFFIXES = (".min.py", "_pb2.py", "_pb2_grpc.py")  # generated code
+IGNORED_SUFFIXES = (".min.py", "_pb2.py", "_pb2_grpc.py",  # generated code
+                    ".min.js", ".min.mjs", ".d.ts")  # bundles and type declarations
 
 
 class ScanError(ValueError):

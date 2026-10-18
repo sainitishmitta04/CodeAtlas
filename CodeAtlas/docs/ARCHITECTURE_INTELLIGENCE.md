@@ -157,7 +157,7 @@ LLM failures in these endpoints **do not** produce an error status, because the 
 
 ## 7. Limitations
 
-- **Python only.** The analysis is static: no runtime traces, dynamic imports, dependency injection or reflection. Execution paths follow statically resolved calls only, and `name_match` resolutions are labelled as such.
+- **Python, JavaScript and TypeScript.** The analysis is static: no runtime traces, dynamic imports with computed paths, dependency injection or reflection. Execution paths follow statically resolved calls only, and `name_match` resolutions are labelled as such.
 - **Layers are heuristic.** In unconventional repositories more components stay unclassified. That is intended: they are not guessed.
 - **Not extracted:** parameter types, return values, attributes and instantiation sites.
 - **Source excerpts** require a local project whose files are unchanged since its last sync. GitHub and ZIP projects show no excerpt.

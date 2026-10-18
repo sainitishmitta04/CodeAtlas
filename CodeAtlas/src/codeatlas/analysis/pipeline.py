@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 
 from codeatlas import ids
-from codeatlas.analysis.extractor import extract_python
+from codeatlas.analysis.languages import extract_file
 from codeatlas.analysis.resolver import build_graph
 from codeatlas.analysis.scanner import scan_repository
 from codeatlas.config import Settings
@@ -36,7 +36,7 @@ def analyze_repository(path: str, settings: Settings, name: str | None = None,
         pid = ids.project_id_for(scan.root, name)
     else:
         project_name, pid = source.project_name, source.project_id
-    analyses = [extract_python(f) for f in scan.files]
+    analyses = [extract_file(f) for f in scan.files]
     rows, stats = build_graph(scan, analyses, pid, project_name)
     out = AnalysisOutput(pid, project_name, scan, analyses, rows, stats, source)
     if source is not None:

@@ -56,6 +56,7 @@ class CallSite(BaseModel):
 
 class FileAnalysis(BaseModel):
     path: str
+    language: str = "python"  # "python" | "javascript" | "typescript"
     sha256: str
     size_bytes: int
     loc: int

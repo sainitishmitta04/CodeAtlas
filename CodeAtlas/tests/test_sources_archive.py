@@ -109,8 +109,8 @@ def test_truncated_zip(tmp_path):
         extract_zip(cut, tmp_path / "out", LIMITS)
 
 
-def test_no_python_files(tmp_path):
-    z = build_zip(tmp_path / "docs.zip", {"README.md": "x", "src/app.js": "let a"})
+def test_no_supported_source_files(tmp_path):
+    z = build_zip(tmp_path / "docs.zip", {"README.md": "x", "src/style.css": "a {}"})
     with pytest.raises(InvalidSource, match="no supported source files"):
         extract_zip(z, tmp_path / "out", LIMITS)
 
