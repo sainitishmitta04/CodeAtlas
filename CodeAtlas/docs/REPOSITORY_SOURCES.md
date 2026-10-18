@@ -12,7 +12,7 @@ CodeAtlas can now analyze a repository from three sources:
 | Source | How it is read | Where `root_path` points in Neo4j |
 |---|---|---|
 | **Local Directory** | Read directly from the folder, as before | The real absolute path, unchanged |
-| **GitHub URL** (public repos only) | A GitHub source archive is downloaded into a temporary folder. The `git` program is not used and no token is involved. | `github.com/Owner/Repo@ref` |
+| **GitHub URL** (public repos only) | A GitHub source archive is downloaded into a temporary folder. The `git` program is not used. An optional server-side `GITHUB_TOKEN` raises GitHub's rate limit. | `github.com/Owner/Repo@ref` |
 | **ZIP Upload** | The archive is safely extracted into a temporary folder | `zip:<file>.zip (sha256 <12 hex>)` |
 
 All three sources go through the same steps:
@@ -116,8 +116,9 @@ To refresh a GitHub project, run the same URL and ref again. That gives the same
   2. `GET https://api.github.com/repos/{owner}/{repo}/zipball/{ref}`. GitHub answers with a redirect to `codeload.github.com`.
 - **Redirects** are followed manually, at most 3, and only to `https` on `api.github.com`, `codeload.github.com` or `github.com`, with no username or port in the URL.
 - **No credentials.**
-  - No token setting exists, and no `Authorization` header is ever sent.
-  - `trust_env=False`, so httpx ignores `.netrc`, proxy variables and `GITHUB_TOKEN`.
+  - **Optional token:** set `GITHUB_TOKEN` (a read-only token, no scopes needed for public repos) in the backend's environment. It is never sent to the browser. It is attached only to `api.github.com` requests and removed before any archive-host request, so it never reaches a redirect target.
+  - Without it, GitHub allows 60 anonymous API requests per hour per IP address; the app reports this as a rate-limit error with the ZIP alternative.
+  - `trust_env=False`, so httpx ignores `.netrc` and proxy variables.
 - **Timeouts:** 10 s to connect and 120 s for the download (`GITHUB_*_TIMEOUT_S`).
 - **Download size:** capped at `MAX_ARCHIVE_BYTES`, checked against the declared `Content-Length` and again while streaming.
 - **Readable errors:**
@@ -171,8 +172,8 @@ To refresh a GitHub project, run the same URL and ref again. That gives the same
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MAX_ARCHIVE_BYTES` | 50,000,000 | Maximum upload or download size |
-| `MAX_EXTRACTED_BYTES` | 300,000,000 | Maximum total uncompressed size declared by the archive |
+| `MAX_ARCHIVE_BYTES` | 200,000,000 | Maximum upload or download size |
+| `MAX_EXTRACTED_BYTES` | 600,000,000 | Maximum total uncompressed size declared by the archive |
 | `MAX_ARCHIVE_ENTRIES` | 20,000 | Maximum number of entries in the archive |
 | `MAX_COMPRESSION_RATIO` | 200 | Maximum ratio for entries larger than `COMPRESSION_RATIO_MIN_BYTES` (1,000,000) |
 | `GITHUB_TIMEOUT_S` / `GITHUB_CONNECT_TIMEOUT_S` | 120 / 10 | Download / connect timeouts |

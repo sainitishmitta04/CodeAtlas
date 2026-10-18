@@ -131,16 +131,28 @@ def parse_github_url(url: str, ref: str | None = None) -> RepoSpec:
 
 
 def make_client(settings: Settings) -> httpx.Client:
+    headers = dict(HEADERS)
+    if settings.github_token and settings.github_token.get_secret_value():
+        headers["Authorization"] = f"Bearer {settings.github_token.get_secret_value()}"
     return httpx.Client(
-        headers=HEADERS, follow_redirects=False, trust_env=False,
+        headers=headers, follow_redirects=False, trust_env=False,
         timeout=httpx.Timeout(settings.github_timeout_s, connect=settings.github_connect_timeout_s))
+
+
+def _build(client: httpx.Client, url: str) -> httpx.Request:
+    """The request for one hop. Authorization is attached for the REST API only, never for the
+    archive host, so the token cannot leak through a redirect."""
+    request = client.build_request("GET", url)
+    if (urlsplit(url).hostname or "").lower() != "api.github.com":
+        request.headers.pop("Authorization", None)
+    return request
 
 
 def _send(client: httpx.Client, url: str) -> httpx.Response:
     """GET with manual, host-restricted redirects. Returns an open streaming response."""
     for _ in range(MAX_REDIRECTS + 1):
         try:
-            resp = client.send(client.build_request("GET", url), stream=True)
+            resp = client.send(_build(client, url), stream=True)
         except httpx.TimeoutException as exc:
             raise DownloadFailed("GitHub did not respond in time; try again later.") from exc
         except httpx.HTTPError as exc:
@@ -165,8 +177,9 @@ def _raise_for_status(resp: httpx.Response, not_found: str) -> None:
     if resp.status_code in (403, 429) and (resp.headers.get("x-ratelimit-remaining") == "0"
                                           or "retry-after" in resp.headers
                                           or resp.status_code == 429):
-        raise RateLimited("GitHub's unauthenticated rate limit was reached (60 requests/hour). "
-                          "Wait and try again, or upload the repository as a ZIP.")
+        raise RateLimited("GitHub's rate limit was reached. Wait and try again, or upload the "
+                          "repository as a ZIP. (The server admin can set GITHUB_TOKEN to raise the "
+                          "limit.)")
     if resp.status_code in (404, 451):
         raise SourceNotFound(not_found)
     if resp.status_code == 403:

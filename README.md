@@ -1,48 +1,123 @@
 <div align="center">
 
-# 🗺️ CodeAtlas
+# CodeAtlas
 
-### Turn any repository into a living knowledge graph in Neo4j
+**Turn a code repository into a knowledge graph in Neo4j, then explore it, query it and ask it questions.**
 
-Explore it visually. Ask it questions. Take guided tours. See how it is layered.
+[![Live demo](https://img.shields.io/badge/Live%20demo-codeatlas--1--awvc.onrender.com-118d4f?style=for-the-badge)](https://codeatlas-1-awvc.onrender.com)
+[![Neo4j](https://img.shields.io/badge/Neo4j-Aura-018bff?logo=neo4j&logoColor=white)](https://neo4j.com)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab?logo=python&logoColor=white)](https://www.python.org)
+[![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
+[![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=black)](https://react.dev)
+[![tree-sitter](https://img.shields.io/badge/parser-tree--sitter-6b7280)](https://tree-sitter.github.io)
 
-![Neo4j](https://img.shields.io/badge/Neo4j-Aura-018bff?logo=neo4j&logoColor=white)
-![Python](https://img.shields.io/badge/Python-3.11+-3776ab?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?logo=fastapi&logoColor=white)
-![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=black)
+[**Try the live demo →**](https://codeatlas-1-awvc.onrender.com) · [Deployment guide](CodeAtlas/docs/DEPLOYMENT.md) · [Supported languages](CodeAtlas/docs/LANGUAGES.md)
 
 </div>
 
 ---
 
-## What is CodeAtlas?
+## About
 
-Joining a new codebase is slow. You open files, follow imports and grep for callers, and you still can't see the whole picture.
+CodeAtlas reads a repository, works out how its files, classes and functions depend on each other, and stores the result as a **property graph in Neo4j Aura**. Every view in the app is a Cypher query over that graph, so impact analysis, shortest paths, architecture layers and guided tours all come from the same source of truth.
 
-**CodeAtlas reads a repository, works out how everything connects, and stores it as a graph in [Neo4j](https://neo4j.com).** Files, classes and functions become **nodes**. Imports, calls and inheritance become **relationships**. Questions that take hours by hand become short graph queries:
+Load a repository from a local folder, a public GitHub URL or a ZIP file. Then:
 
-- *"What breaks if I change `models.py`?"*
-- *"How does `main()` reach the database code?"*
-- *"Which parts of this project are the most depended on?"*
+- see the **full dependency graph** and the **shortest path** between any two symbols;
+- find out **what breaks** if you change a file or function;
+- see the **inferred architecture** (layers, layering violations, dependency cycles, entry points);
+- follow **guided tours** and get a **plain-language explanation** of any symbol;
+- **search** the code by describing it, and ask **grounded questions** whose answers cite the graph.
+
+> **GitHub "About" settings** (for the repository page): *Neo4j-powered code knowledge graph: parse repositories with tree-sitter, query dependencies, calls and architecture in Cypher, explore in a web UI.*
+> Suggested topics: `neo4j`, `knowledge-graph`, `code-analysis`, `tree-sitter`, `static-analysis`, `fastapi`, `react`, `typescript`, `python`, `javascript`, `dependency-graph`, `code-graph`.
 
 ---
 
-## 🔷 Neo4j is the heart of the project
+## Quick start
 
-Every feature below reads from the graph in Neo4j. Nothing is computed from a separate copy of the code.
+**Use the hosted app:** open **[codeatlas-1-awvc.onrender.com](https://codeatlas-1-awvc.onrender.com)**. Go to **Analyze repository**, choose a source, run a **dry run**, then confirm the write.
 
-| What CodeAtlas needs | How Neo4j delivers it |
+**Run it locally** (Python 3.11+, [uv](https://docs.astral.sh/uv/), Node.js 22+ and a Neo4j Aura instance):
+
+```bash
+git clone <this repository> && cd Neo4j
+cp CodeAtlas/.env.example .env       # then fill in NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD, NEO4J_DATABASE
+
+cd CodeAtlas
+uv sync --frozen                     # backend dependencies
+(cd ui && npm ci)                    # frontend dependencies
+
+uvicorn codeatlas.api.main:app --port 8000    # terminal 1: API on http://127.0.0.1:8000
+(cd ui && npm run dev)                        # terminal 2: web app on http://localhost:5173
+```
+
+Try it without a database first:
+
+```bash
+cd CodeAtlas
+uv run python -m pytest                                              # offline test suite
+uv run python -m codeatlas.cli analyze tests/fixtures/sample_repo --dry-run
+```
+
+---
+
+## Features
+
+### Load any repository
+
+| Source | How | Notes |
+|---|---|---|
+| **Local folder** | Type a path | Read in place. Respects `.gitignore`, skips `node_modules`, `.venv`, `dist`, `build`, caches and minified bundles. |
+| **GitHub URL** | `https://github.com/owner/repo`, optionally `/tree/<branch-or-tag>` | Public repositories. Downloaded as an archive, so `git` is not needed. |
+| **ZIP upload** | Choose a `.zip` (up to 200 MB) | Extracted safely: path traversal, symlinks, zip bombs and encrypted entries are rejected. |
+
+Every source goes through the same pipeline:
+
+- **Dry run first.** See the project ID and the file, node and relationship counts without writing anything.
+- **Confirm before writing.** Writes are scoped to one project, and updating an existing project needs a second confirmation.
+- **Re-analyse any time.** The same GitHub URL and ref map to the same project and update it in place.
+
+### Explore the graph
+
+| Page | What it shows |
 |---|---|
-| Store code as it really is: connected | **Nodes** for files, classes, functions and modules. **Relationships** for `IMPORTS`, `CALLS`, `INHERITS`, `DEFINES`. |
-| "What depends on this?" | A short **Cypher** traversal, up to 3 hops. No joins. |
-| "Shortest dependency path from A to B" | Native `shortestPath` over `IMPORTS` and `CALLS`. |
-| Many repositories in one database | Every node carries a `project_id`, and every query is anchored on it. Projects never mix. |
-| Safe re-analysis | Stamp-and-sweep writes: re-running converges to the current code. |
-| Fast lookups | Uniqueness constraints and indexes, created automatically. |
-| Trustworthy AI answers | The LLM sees only **facts retrieved from the graph**, never the whole repo. |
-| Inspect it yourself | Open the same graph in the **Aura console** (Explore / Query). Starter queries are in [`cypher/aura_examples.cypher`](CodeAtlas/cypher/aura_examples.cypher). |
+| **Overview** | Project counts and a complete-graph view that loads in pages. |
+| **Graph** | Interactive files, classes and functions. Click a node for its properties and expand its neighbours. |
+| **Paths & Impact** | The shortest path between two items. For a file or function: who imports it, who calls it, who inherits from it, and what static analysis cannot see. |
 
-### The graph model
+### Understand the architecture
+
+| Page | What it shows |
+|---|---|
+| **Architecture** | Inferred layers (presentation, API, business, domain, data, infrastructure, utilities, tests), layering violations, dependency cycles and entry points. Unclear code stays *unclassified* instead of being guessed. |
+| **Tours** | Guided walkthroughs built from the graph: project overview, entry point, component, execution path, dependencies and impact. Each step is marked *observed* or *inferred*. |
+| **Explain** | For any function, class, file or module: signature, callers, callees, parent, likely side effects and unknowns. Optional AI interpretation, written only from those facts. |
+| **Search** | Describe what you need in plain words. Results are ranked by name, path, docstring and graph signals, handle synonyms and typos, and show why each one matched. |
+
+### Ask questions
+
+Ask in plain English, such as *"What would break if I changed `models.py`?"* CodeAtlas runs a fixed Cypher query, retrieves a bounded set of facts from Neo4j, and asks the LLM to answer **only from those facts**. The facts and sub-graph are shown next to the answer. If the LLM is unavailable you get the evidence and a clear error, not an invented answer.
+
+### Diagnostics
+
+Neo4j and LLM status, graph integrity checks, and warnings about configuration problems.
+
+---
+
+## Languages
+
+| Language | Extensions | Parser |
+|---|---|---|
+| Python | `.py` | tree-sitter-python |
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | tree-sitter-javascript |
+| TypeScript | `.ts`, `.mts`, `.cts`, `.tsx` | tree-sitter-typescript (TSX grammar for `.tsx`) |
+
+Each language gets its own extractor and import resolver. Known limits are listed in [docs/LANGUAGES.md](CodeAtlas/docs/LANGUAGES.md). Other languages are not analysed yet; their files are ignored.
+
+---
+
+## What is in the graph
 
 ```mermaid
 graph LR
@@ -56,198 +131,103 @@ graph LR
     Fn -->|CALLS| Fn2[Function]
 ```
 
-| Node | Represents | Key properties |
-|---|---|---|
-| `Project` | One analyzed repository | name, source, sync status |
-| `File` | A source file | path, lines of code, hash, docstring |
-| `Class` | A class | name, line range, base classes |
-| `Function` | A function or method | parameters, line range, unresolved and external calls |
-| `Module` | An external package, such as `requests` | name, kind |
+| Node | Meaning |
+|---|---|
+| `Project` | One analysed repository, with its source and languages |
+| `File` | A source file, with its language, lines of code and hash |
+| `Class` / `Function` | Classes, methods and functions, with line ranges and signatures |
+| `Module` | An external package, such as `react` or `requests` |
 
-**Relationships keep their evidence.** An `IMPORTS` edge records the line numbers and imported names. A `CALLS` edge records each call line and a **confidence**:
+Every relationship keeps its evidence. `IMPORTS` records the lines and imported names. `CALLS` records each call line and a **confidence**:
 
-- `exact`: resolved with certainty (same file, imported name, `self.method`, constructor).
+- `exact`: resolved with certainty (same file, imported name, `this`/`self` method, constructor).
 - `name_match`: the only definition with that name in the project.
 
-Calls that can't be resolved honestly, such as `obj.method()` on an unknown type, create **no edge**. They are listed on the function instead, so the graph never claims more than it knows.
+Calls that cannot be resolved honestly, such as `service.place()` on an unknown type, create **no edge**. They are listed on the function, so the graph never claims more than it knows.
+
+**Why a graph database?** Code is a network. "What depends on this?" and "how does A reach B?" are traversals, which Cypher expresses directly. Every node carries a `project_id`, so many repositories share one database without mixing, and writes are stamped and swept, so a re-run converges to the current source. Open the same graph in the Aura console with the queries in [`CodeAtlas/cypher/aura_examples.cypher`](CodeAtlas/cypher/aura_examples.cypher).
 
 ---
 
-## ✨ Features
-
-### 📥 1. Load a repository from any source
-
-| Source | How | Notes |
-|---|---|---|
-| 📁 **Local folder** | Type a path | Read in place. Respects `.gitignore` and skips `venv`, `node_modules`, caches and generated code. |
-| 🐙 **GitHub URL** | `https://github.com/owner/repo`<br>`…/repo.git`<br>`…/repo/tree/<branch-or-tag>` | Public repos only. Optionally choose a branch, tag or commit. Downloaded as an archive. No `git` and no token needed. |
-| 🗜️ **ZIP upload** | Choose a `.zip` | Safely extracted: no path traversal, no symlinks, and size and compression-ratio limits. A GitHub-style wrapper folder is handled. |
-
-All three go through the same pipeline and the same safety checks.
-
-- **Dry run first.** See the project ID and the file, node and relationship counts without writing anything.
-- **Explicit confirmation to write.** Updating an existing project needs a second confirmation. A write can only affect the project you picked.
-- **Re-analyze any time.** Same GitHub URL and ref means the same project, updated in place.
-
-> **Language support:** CodeAtlas analyzes **Python** (`.py`), **JavaScript** (`.js`, `.jsx`, `.mjs`, `.cjs`) and **TypeScript** (`.ts`, `.tsx`, `.mts`, `.cts`) files. Any repository in the formats above can be loaded; other languages' files are ignored. See [Limits](#limits) and [docs/LANGUAGES.md](CodeAtlas/docs/LANGUAGES.md).
-
-### 🧭 2. Explore the graph
-
-| Page | What you get |
-|---|---|
-| **Overview** | Project counts, key metrics and a complete-graph view that loads in pages, so large graphs stay responsive. |
-| **Graph** | An interactive graph of files, classes and functions. Click a node for its properties, then expand its neighbours. |
-| **Paths & Impact** | **Shortest path** between two items. **Change impact**: pick a file or function and see who imports it, who calls it and who inherits from it, plus what static analysis can't see. |
-
-### 🧠 3. Understand the architecture
-
-| Page | What you get |
-|---|---|
-| **Architecture** | Infers layers (presentation, api, business, domain, data, infrastructure, utilities, tests) from imports, decorators, base classes and naming. Shows a layer diagram, **layering violations**, **dependency cycles** and **entry points**. Unclear parts stay "unclassified" instead of being guessed. |
-| **Tours** | Step-by-step walkthroughs built by traversing the graph: *overview, entry point, component, execution path, dependency, impact*. Every step shows its evidence and whether it was **observed** or **inferred**. |
-| **Explain** | Pick any function, class, file or module. Get its signature, callers, callees, parent, likely side effects and **unknowns**. One optional click adds an AI interpretation written only from those facts. |
-| **Search** | Describe what you need in plain words ("validate user input"). Ranks symbols by name, path, docstring and graph signals, handles synonyms and typos, and shows **why** each result matched. |
-
-### 💬 4. Ask questions (grounded Q&A)
-
-Ask in plain English:
-
-- *"What does this project do?"*
-- *"Which files are the most important?"*
-- *"Who calls `process_order`?"*
-- *"What would break if I changed `models.py`?"*
+## How it works
 
 ```mermaid
 graph LR
-    Q[Your question] --> I[Detect intent]
-    I --> C[Fixed Cypher query]
-    C --> N[(Neo4j)]
-    N --> Fa[Bounded facts]
-    Fa --> L[LLM writes answer<br/>from facts only]
-    L --> A[Answer + evidence + sub-graph]
-```
-
-The answer is shown next to the facts and sub-graph it came from. If the LLM is unavailable, you get the retrieved evidence and a clear error, never an invented answer.
-
-### 🩺 5. Stay in control
-
-| Page | What you get |
-|---|---|
-| **Diagnostics** | Neo4j and LLM status, graph integrity checks, and notices about configuration. |
-
-> **The LLM is optional.** Only Q&A answers, tour narration and AI interpretations use it. Everything else works without it, and no source code is sent to an LLM while a repository is being analyzed.
-
----
-
-## ⚙️ How it works
-
-```mermaid
-graph LR
-    S[Repository<br/>folder / GitHub / ZIP] --> A[Scan]
+    S[Folder / GitHub / ZIP] --> A[Scan]
     A --> B[Parse<br/>tree-sitter]
-    B --> R[Resolve<br/>names]
+    B --> R[Resolve<br/>imports & calls]
     R --> Y[Sync]
     Y --> N[(Neo4j Aura)]
     N --> API[FastAPI]
-    API --> UI[React web app]
+    API --> UI[React app]
     API --> G[Gemini<br/>optional]
 ```
 
-1. **Scan.** Find Python files (up to 1,500) and skip files over 300 KB.
-2. **Parse.** [tree-sitter](https://tree-sitter.github.io/) extracts files, classes, functions, imports and call sites.
-3. **Resolve.** Match each call and import to its definition, with a confidence label.
-4. **Sync.** Write to Neo4j in batches of 500.
-5. **Serve.** FastAPI exposes graph, intelligence and Q&A endpoints, and the React app draws them.
+1. **Scan.** Find supported files (up to 1,500 per project). Files over 300 KB are skipped.
+2. **Parse.** tree-sitter extracts symbols, imports and call sites.
+3. **Resolve.** Each import and call is matched to its definition, with a confidence label.
+4. **Sync.** Batched writes (500 rows per batch). A run locks the project, stamps its items with a run id, and sweeps stale items only if every batch succeeded. A failed run is flagged and shown as such.
+5. **Serve.** FastAPI exposes the graph, the intelligence views and Q&A. The React app draws them. In production one service serves both.
 
-**Safe re-sync.** Each run gets a `run_id`. CodeAtlas locks the project and writes everything stamped with that id. Only if **every** batch succeeded does it delete items left from older runs. A failed run is flagged `failed`, and the UI warns you instead of showing it as complete.
+No source code is sent to an LLM during analysis. The LLM is optional and only sees facts retrieved from the graph.
 
 ---
 
-## 🧰 Tech stack
+## Configuration
 
-| Layer | Tools |
+Settings come from environment variables, or from a `.env` file (`CODEATLAS_ENV_FILE`, then `CodeAtlas/.env`, then the repository root). Shell variables fill only values that the file does not define.
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `NEO4J_URI` | yes | `neo4j+s://<instance>.databases.neo4j.io` |
+| `NEO4J_USERNAME` / `NEO4J_PASSWORD` | yes | Aura credentials (secret) |
+| `NEO4J_DATABASE` | yes | Usually `neo4j` |
+| `GEMINI_API_KEY` | no | Enables Q&A, tour narration and AI explanations (secret) |
+| `GEMINI_MODEL` | no | Gemini model name |
+| `GITHUB_TOKEN` | no | Raises GitHub's rate limit for GitHub URL imports. Read-only; sent only to `api.github.com`; never sent to the browser |
+| `MAX_ARCHIVE_BYTES` | no | ZIP / download size limit (default 200 MB) |
+| `MAX_EXTRACTED_BYTES` | no | Uncompressed size limit (default 600 MB) |
+
+Secrets are used only by the backend. Nothing secret is included in the frontend bundle or in API responses.
+
+---
+
+## Deployment
+
+CodeAtlas runs as **one web service**: the FastAPI backend serves the API and the built React UI on the same origin, so there is no CORS setup and no separate frontend host.
+
+On Render (Python runtime):
+
+| Setting | Value |
 |---|---|
-| **Database** | **Neo4j Aura**, Cypher, official `neo4j` Python driver |
-| Analysis | Python, tree-sitter |
-| Backend | FastAPI, Pydantic, Uvicorn |
-| Frontend | React 19, TypeScript, Vite, Sigma.js, Graphology |
-| LLM (optional) | Google Gemini |
-| Tests | pytest (offline), Vitest |
+| Root directory | `CodeAtlas` |
+| Build command | `pip install uv nodeenv && nodeenv -p -n 22 && cd ui && npm ci && npm run build && cd .. && uv sync --frozen` |
+| Start command | `uv run uvicorn codeatlas.api.main:app --host 0.0.0.0 --port $PORT` |
+| Health check | `/health` |
+
+The live demo is deployed this way at **[codeatlas-1-awvc.onrender.com](https://codeatlas-1-awvc.onrender.com)**. The full step-by-step guide, with troubleshooting, is in [docs/DEPLOYMENT.md](CodeAtlas/docs/DEPLOYMENT.md).
 
 ---
 
-## 🚀 Getting started
+## Limits
 
-**You need:** Python 3.11+, [`uv`](https://docs.astral.sh/uv/), Node.js and npm, and a **Neo4j Aura** instance ([AuraDB Free](https://neo4j.com/cloud/platform/aura-graph-database/) is enough; it pauses after 72 h idle, so click *Resume* in the console). A Gemini API key is optional.
-
-**1. Configure.** Create a `.env` in the repository root. It is git-ignored, and `CodeAtlas/.env.example` lists the names.
-
-```bash
-NEO4J_URI=neo4j+s://<your-instance>.databases.neo4j.io
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=<your password>
-NEO4J_DATABASE=neo4j
-
-# optional (LLM features)
-GEMINI_API_KEY=<your key>
-GEMINI_MODEL=<model name>
-```
-
-**2. Install.**
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-cd CodeAtlas && uv sync --active --frozen     # backend
-cd ui && npm install                          # frontend
-```
-
-**3. Try it offline** (no database needed).
-
-```bash
-cd CodeAtlas
-python -m pytest
-python -m codeatlas.cli analyze tests/fixtures/sample_repo --dry-run
-```
-
-**4. Run.**
-
-```bash
-# terminal 1: API  → http://127.0.0.1:8000  (docs at /docs)
-cd CodeAtlas && uvicorn codeatlas.api.main:app --port 8000
-
-# terminal 2: web app  → http://localhost:5173
-cd CodeAtlas/ui && npm run dev
-```
-
-**5. Use it.** Open the app, go to **Analyze repository**, pick a source (folder, GitHub URL or ZIP), run a **dry run**, then confirm the write. Choose the project in the sidebar and explore.
-
-<details>
-<summary><b>Command-line usage</b></summary>
-
-```bash
-python -m codeatlas.cli analyze PATH [--name NAME] [--dry-run]
-python -m codeatlas.cli integrity PROJECT_ID
-python -m codeatlas.cli validate-cypher                    # EXPLAIN-checks every query, read-only
-python -m codeatlas.cli delete-project PROJECT_ID --yes    # removes only that project
-```
-</details>
+- **Languages:** Python, JavaScript and TypeScript for now. See [docs/LANGUAGES.md](CodeAtlas/docs/LANGUAGES.md) for each language's gaps.
+- **Static analysis only:** no runtime traces, reflection, or computed dynamic imports. No type inference for calls on unknown receivers.
+- **Repositories:** GitHub import works for public repositories only. Anonymous GitHub access is limited to 60 requests per hour; use a ZIP upload or set `GITHUB_TOKEN`.
+- **Graph size per project:** 1,500 files, 25,000 nodes and 60,000 relationships. These limits fit AuraDB Free.
+- **Hosting:** free-tier hosts sleep when idle, so the first request after a pause can take about a minute. Aura Free pauses after 72 hours of inactivity; resume it in the Aura console.
+- **Search** is lexical plus graph-based, not embedding-based. **Architecture layers** are heuristic.
 
 ---
 
-## 📏 Limits
+## Documentation
 
-- **Three language families for now:** Python, JavaScript and TypeScript (including TSX/JSX). Other languages (Java, Go, Rust, and so on) are not yet supported. See [docs/LANGUAGES.md](CodeAtlas/docs/LANGUAGES.md) for what each language covers.
-- **Static analysis only.** No runtime traces, reflection or dynamic `import()` with computed paths, and no type inference for `obj.method()` calls.
-- **Public GitHub repositories only.** Private repositories aren't supported. Unauthenticated GitHub rate limits apply (60 requests per hour).
-- **Size caps (AuraDB Free):** 1,500 files, 25,000 nodes and 60,000 relationships per project. Queries time out after 30 s. Views are capped at depth 3 and 400 nodes.
-- **Layers are heuristic**, and **search is lexical plus graph**, not embedding-based. A Neo4j vector index is a natural next step.
-
-## 📚 More documentation
-
-| Doc | Topic |
+| Document | Topic |
 |---|---|
-| [`RUN_AND_VERIFY.md`](CodeAtlas/docs/RUN_AND_VERIFY.md) | Step-by-step run guide and inspecting the graph in Aura |
-| [`REPOSITORY_SOURCES.md`](CodeAtlas/docs/REPOSITORY_SOURCES.md) | Folder, GitHub and ZIP inputs, and their safety checks |
-| [`ARCHITECTURE_INTELLIGENCE.md`](CodeAtlas/docs/ARCHITECTURE_INTELLIGENCE.md) | How layers, tours, explanations and search work |
-| [`DIAGNOSTICS_AND_FULL_GRAPH.md`](CodeAtlas/docs/DIAGNOSTICS_AND_FULL_GRAPH.md) | LLM errors, complete-graph view and status reporting |
-| [`aura_examples.cypher`](CodeAtlas/cypher/aura_examples.cypher) | Example Cypher queries for the Aura console |
+| [Deployment](CodeAtlas/docs/DEPLOYMENT.md) | Render setup, environment variables, updates and troubleshooting |
+| [Run & verify](CodeAtlas/docs/RUN_AND_VERIFY.md) | Local run guide and checking the graph in the Aura console |
+| [Supported languages](CodeAtlas/docs/LANGUAGES.md) | What each language extracts, its limits, and how to add one |
+| [Repository sources](CodeAtlas/docs/REPOSITORY_SOURCES.md) | Folder, GitHub and ZIP inputs and their safety checks |
+| [Architecture intelligence](CodeAtlas/docs/ARCHITECTURE_INTELLIGENCE.md) | How layers, tours, explanations and search are computed |
+| [Diagnostics](CodeAtlas/docs/DIAGNOSTICS_AND_FULL_GRAPH.md) | LLM errors, the complete-graph view and status reporting |
+| [Example Cypher](CodeAtlas/cypher/aura_examples.cypher) | Queries to run in the Aura console |

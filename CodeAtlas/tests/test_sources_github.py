@@ -205,9 +205,36 @@ def test_empty_archive(tmp_path):
                                 tmp_path / "a.zip", 1000)
 
 
-def test_client_sends_no_credentials_and_ignores_environment(offline_settings, monkeypatch):
-    monkeypatch.setenv("GITHUB_TOKEN", "should-not-be-used")
+def test_client_sends_no_credentials_unless_a_token_is_configured(offline_settings):
     with github.make_client(offline_settings) as c:
         assert c.trust_env is False and c.follow_redirects is False
         assert "authorization" not in {k.lower() for k in c.headers}
     assert json.dumps(github.HEADERS).lower().count("token") == 0
+
+
+def test_configured_token_goes_to_the_api_host_only(offline_settings):
+    from pydantic import SecretStr
+    settings = offline_settings.model_copy(update={"github_token": SecretStr("ghp_test_value")})
+    seen: dict[str, str | None] = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen[req.url.host] = req.headers.get("authorization")
+        if req.url.host == "api.github.com" and req.url.path.lower() == "/repos/owner/repo":
+            return httpx.Response(200, json=meta())
+        if req.url.host == "api.github.com":
+            return httpx.Response(302, headers={"location": "https://codeload.github.com/o/r.zip"})
+        return httpx.Response(200, content=ZIP_BYTES)
+
+    client = github.make_client(settings)
+    client._transport = httpx.MockTransport(handler)
+    with client:
+        github.resolve_repo(client, github.RepoSpec("Owner", "Repo"))
+        github._send(client, "https://api.github.com/repos/Owner/Repo/zipball/main").close()
+    assert seen["api.github.com"] == "Bearer ghp_test_value"
+    assert seen["codeload.github.com"] is None
+
+
+def test_rate_limit_message_points_to_zip_upload():
+    resp = httpx.Response(429, headers={"retry-after": "60"})
+    with pytest.raises(RateLimited, match="upload the repository as a ZIP"):
+        github._raise_for_status(resp, "not found")
