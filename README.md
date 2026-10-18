@@ -187,6 +187,7 @@ Settings come from environment variables, or from a `.env` file (`CODEATLAS_ENV_
 | `GITHUB_TOKEN` | no | Raises GitHub's rate limit for GitHub URL imports. Read-only; sent only to `api.github.com`; never sent to the browser |
 | `MAX_ARCHIVE_BYTES` | no | ZIP / download size limit (default 200 MB) |
 | `MAX_EXTRACTED_BYTES` | no | Uncompressed size limit (default 600 MB) |
+| `MAX_ARCHIVE_ENTRIES` | no | Maximum files in a ZIP or GitHub archive (default 100,000) |
 
 Secrets are used only by the backend. Nothing secret is included in the frontend bundle or in API responses.
 

@@ -174,7 +174,7 @@ To refresh a GitHub project, run the same URL and ref again. That gives the same
 |---|---|---|
 | `MAX_ARCHIVE_BYTES` | 200,000,000 | Maximum upload or download size |
 | `MAX_EXTRACTED_BYTES` | 600,000,000 | Maximum total uncompressed size declared by the archive |
-| `MAX_ARCHIVE_ENTRIES` | 20,000 | Maximum number of entries in the archive |
+| `MAX_ARCHIVE_ENTRIES` | 100,000 | Maximum number of entries in the archive |
 | `MAX_COMPRESSION_RATIO` | 200 | Maximum ratio for entries larger than `COMPRESSION_RATIO_MIN_BYTES` (1,000,000) |
 | `GITHUB_TIMEOUT_S` / `GITHUB_CONNECT_TIMEOUT_S` | 120 / 10 | Download / connect timeouts |
 | `CODEATLAS_TMP_DIR` | system temp | Parent folder for temporary checkouts |
